@@ -1,0 +1,1156 @@
+import SwiftUI
+import AVFoundation
+
+struct ContentView: View {
+    @Environment(StudioModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        NavigationSplitView {
+            SidebarView()
+                .navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 400)
+        } detail: {
+            VStack(spacing: 0) {
+                if let problem = model.setupProblem {
+                    Banner(text: problem, systemImage: "exclamationmark.triangle.fill", tint: .orange)
+                }
+                if let playlist = model.selectedPlaylist {
+                    PlaylistView(playlist: playlist)
+                } else if let lib = model.selectedLibrary {
+                    LibraryPage(library: lib)
+                } else if let song = model.selectedSong, model.editingSongID != song.id {
+                    SongPlayerView(song: song)
+                } else {
+                    if let song = model.selectedSong {
+                        EditingHeader(song: song)
+                        Divider()
+                    }
+                    ComposerView()
+                    Divider()
+                    StatusBar()
+                    if let song = model.selectedSong {
+                        Divider()
+                        SongPanel(song: song)
+                    }
+                }
+                if model.isPlaying, let np = model.nowPlayingID.flatMap(model.song),
+                   !(model.selectedSongID == np.id && model.editingSongID == nil) {
+                    Divider()
+                    NowPlayingBar(song: np)
+                }
+            }
+        }
+        .alert("Something went wrong", isPresented: Binding(
+            get: { model.errorMessage != nil },
+            set: { if !$0 { model.errorMessage = nil } }
+        )) {
+            Button("OK") { model.errorMessage = nil }
+        } message: {
+            Text(model.errorMessage ?? "")
+        }
+    }
+}
+
+// MARK: - Sidebar: Library › Category › Song, then Playlists
+
+struct SidebarView: View {
+    @Environment(StudioModel.self) private var model
+    @State private var newName = ""
+    @State private var categoryTarget: UUID? = nil
+    @State private var renameTarget: RenameTarget? = nil
+    @State private var renameText = ""
+
+    enum RenameTarget: Identifiable {
+        case library(UUID), category(UUID, String), playlist(UUID)
+        var id: String {
+            switch self {
+            case .library(let id): return "l:\(id)"
+            case .category(let l, let n): return "c:\(l):\(n)"
+            case .playlist(let id): return "p:\(id)"
+            }
+        }
+    }
+
+    var body: some View {
+        @Bindable var model = model
+        List(selection: $model.selection) {
+            Section("Libraries") {
+                ForEach(model.libraries) { lib in
+                    DisclosureGroup {
+                        ForEach(lib.categories, id: \.self) { category in
+                            let items = model.songs(in: lib.id, category: category)
+                            DisclosureGroup {
+                                if items.isEmpty {
+                                    Text("Empty").font(.caption).foregroundStyle(.tertiary)
+                                }
+                                ForEach(items) { song in
+                                    SongRow(song: song)
+                                        .tag(SidebarSelection.song(song.id))
+                                        .contextMenu { SongContextMenu(song: song) }
+                                }
+                            } label: {
+                                Label {
+                                    HStack {
+                                        Text(category)
+                                        Spacer()
+                                        Text("\(items.count)").font(.caption).foregroundStyle(.tertiary)
+                                    }
+                                } icon: { Image(systemName: "folder") }
+                            }
+                            .contextMenu {
+                                if category != LibraryIndex.uncategorized {
+                                    Button("Rename…") { renameText = category; renameTarget = .category(lib.id, category) }
+                                    Button("Delete category", role: .destructive) { model.deleteCategory(category, in: lib.id) }
+                                }
+                            }
+                        }
+                    } label: {
+                        Label {
+                            HStack {
+                                Text(lib.name).fontWeight(.semibold)
+                                if model.isRadioOn(lib.id) {
+                                    Image(systemName: "dot.radiowaves.left.and.right")
+                                        .foregroundStyle(.red).symbolEffect(.variableColor.iterative, isActive: true)
+                                }
+                                Spacer()
+                                Text("\(model.songs(in: lib.id).count)").font(.caption).foregroundStyle(.tertiary)
+                            }
+                        } icon: { Image(systemName: "books.vertical") }
+                        .tag(SidebarSelection.library(lib.id))
+                    }
+                    .tag(SidebarSelection.library(lib.id))
+                    .contextMenu {
+                        Button("Open library page") { model.selection = .library(lib.id) }
+                        Button("New Category…") { newName = ""; categoryTarget = lib.id; model.askNewCategory = true }
+                        Button("Rename…") { renameText = lib.name; renameTarget = .library(lib.id) }
+                        Divider()
+                        Button(model.isRadioOn(lib.id) ? "Stop radio" : "Start radio") { model.setRadio(!model.isRadioOn(lib.id), for: lib.id) }
+                        Divider()
+                        Button("Delete library", role: .destructive) { model.deleteLibrary(lib.id) }
+                            .disabled(model.libraries.count < 2)
+                    }
+                }
+            }
+            Section("Playlists") {
+                if model.index.playlists.isEmpty {
+                    Text("No playlists yet.").font(.caption).foregroundStyle(.tertiary)
+                }
+                ForEach(model.index.playlists) { playlist in
+                    Label(playlist.name, systemImage: "music.note.list")
+                        .badge(playlist.songIDs.count)
+                        .tag(SidebarSelection.playlist(playlist.id))
+                        .contextMenu {
+                            Button("Play") { model.playAll(model.songs(in: playlist)) }
+                            Button("Rename…") { renameText = playlist.name; renameTarget = .playlist(playlist.id) }
+                            Divider()
+                            Button("Delete playlist", role: .destructive) { model.deletePlaylist(playlist.id) }
+                        }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .toolbar {
+            ToolbarItem {
+                Button { model.newSong() } label: { Label("New Song", systemImage: "square.and.pencil") }
+                    .help("Open the composer for a new song (⌘N)")
+            }
+            ToolbarItem {
+                Menu {
+                    Button("New Library…") { newName = ""; model.askNewLibrary = true }
+                    Button("New Category…") {
+                        newName = ""
+                        categoryTarget = model.selectedLibrary?.id ?? model.selectedSong.map { model.index.placement(for: $0.id).library } ?? model.libraries[0].id
+                        model.askNewCategory = true
+                    }
+                    Button("New Playlist…") { newName = ""; model.askNewPlaylist = true }
+                    Divider()
+                    Button("Refresh") { model.refreshLibrary() }
+                } label: { Label("Add", systemImage: "plus") }
+            }
+        }
+        .alert("New library", isPresented: $model.askNewLibrary) {
+            TextField("Name", text: $newName)
+            Button("Create") { if let l = model.addLibrary(newName) { model.selection = .library(l.id) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text("You can add a description and turn on radio from the library page.") }
+        .alert("New category", isPresented: $model.askNewCategory) {
+            TextField("Name", text: $newName)
+            Button("Create") {
+                let target = categoryTarget ?? model.selectedLibrary?.id ?? model.libraries[0].id
+                model.addCategory(newName, to: target)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("In “\((categoryTarget ?? model.selectedLibrary?.id).flatMap(model.library)?.name ?? model.libraries[0].name)”")
+        }
+        .alert("New playlist", isPresented: $model.askNewPlaylist) {
+            TextField("Name", text: $newName)
+            Button("Create") { if let p = model.addPlaylist(newName) { model.selection = .playlist(p.id) } }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Rename", isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })) {
+            TextField("Name", text: $renameText)
+            Button("Rename") {
+                switch renameTarget {
+                case .library(let id):
+                    if var l = model.library(id) { l.name = renameText.trimmingCharacters(in: .whitespaces); if !l.name.isEmpty { model.updateLibrary(l) } }
+                case .category(let lib, let old): model.renameCategory(old, to: renameText, in: lib)
+                case .playlist(let id): model.renamePlaylist(id, to: renameText)
+                case nil: break
+                }
+                renameTarget = nil
+            }
+            Button("Cancel", role: .cancel) { renameTarget = nil }
+        }
+    }
+}
+
+struct SongRow: View {
+    @Environment(StudioModel.self) private var model
+    let song: Song
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: model.isPlaying(song) ? "speaker.wave.2.fill" : (song.source == "radio" ? "dot.radiowaves.left.and.right" : "music.note"))
+                .foregroundStyle(model.isPlaying(song) ? Color.accentColor : .secondary)
+                .frame(width: 14)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(song.title).lineLimit(1)
+                Text(song.created.formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+struct SongContextMenu: View {
+    @Environment(StudioModel.self) private var model
+    let song: Song
+
+    var body: some View {
+        let placement = model.index.placement(for: song.id)
+        Button(model.isPlaying(song) ? "Stop" : "Play") { model.togglePlay(song) }
+        Button("Edit generation details…") { model.beginEditing(song) }
+        Menu("Move to category") {
+            ForEach(model.library(placement.library)?.categories ?? [], id: \.self) { c in
+                Button {
+                    model.place(song, in: placement.library, category: c)
+                } label: {
+                    if placement.category == c { Label(c, systemImage: "checkmark") } else { Text(c) }
+                }
+            }
+        }
+        Menu("Move to library") {
+            ForEach(model.libraries) { l in
+                Button {
+                    model.place(song, in: l.id, category: LibraryIndex.uncategorized)
+                } label: {
+                    if placement.library == l.id { Label(l.name, systemImage: "checkmark") } else { Text(l.name) }
+                }
+            }
+        }
+        Menu("Add to playlist") {
+            if model.index.playlists.isEmpty { Text("No playlists") }
+            ForEach(model.index.playlists) { p in
+                Button(p.name) { model.add(song, to: p.id) }
+            }
+        }
+        Divider()
+        Button("Reveal in Finder") { model.revealInFinder(song) }
+        Button("Move to Trash", role: .destructive) { model.deleteSong(song) }
+    }
+}
+
+// MARK: - Library page (summary, edit sheet, radio)
+
+struct LibraryPage: View {
+    @Environment(StudioModel.self) private var model
+    let library: MusicLibrary
+    @State private var showEdit = false
+
+    var body: some View {
+        let lib = model.library(library.id) ?? library
+        if model.isRadioOn(lib.id) {
+            RadioView(library: lib)
+        } else {
+            LibrarySummary(library: lib, showEdit: $showEdit)
+                .sheet(isPresented: $showEdit) { LibraryEditSheet(libraryID: lib.id) }
+        }
+    }
+}
+
+struct LibrarySummary: View {
+    @Environment(StudioModel.self) private var model
+    let library: MusicLibrary
+    @Binding var showEdit: Bool
+
+    private var canRadio: Bool {
+        model.claudeURL != nil && model.setupProblem == nil
+            && !library.stationBrief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        let lib = library
+        let items = model.songs(in: lib.id)
+        let cats = lib.categories.filter { $0 != LibraryIndex.uncategorized }
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 16) {
+                Image(systemName: "books.vertical.fill").font(.system(size: 34)).foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(lib.name).font(.title2.bold())
+                    Text(lib.description.isEmpty ? "No description yet — press Edit to describe this library and enable radio." : lib.description)
+                        .font(.callout).foregroundStyle(lib.description.isEmpty ? .tertiary : .secondary)
+                        .lineLimit(4)
+                    HStack(spacing: 14) {
+                        Label("\(items.count) song\(items.count == 1 ? "" : "s")", systemImage: "music.note")
+                        Label("\(cats.count) categor\(cats.count == 1 ? "y" : "ies")", systemImage: "folder")
+                        if !lib.refinedDescription.isEmpty { Label("Station brief ready", systemImage: "checkmark.seal") }
+                    }
+                    .font(.caption).foregroundStyle(.tertiary).padding(.top, 2)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 8) {
+                    Button { showEdit = true } label: { Label("Edit", systemImage: "pencil") }
+                    Button {
+                        model.setRadio(true, for: lib.id)
+                    } label: { Label("Start radio", systemImage: "dot.radiowaves.left.and.right") }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canRadio || model.isBusy)
+                        .help(canRadio ? "Continuously write, render and file new songs for this library" : "Add a description (Edit) first")
+                }
+            }
+            .padding(20)
+            Divider()
+            if items.isEmpty {
+                ContentUnavailableView {
+                    Label("No songs yet", systemImage: "music.note.list")
+                } description: {
+                    Text(canRadio ? "Start radio to fill this library automatically, or compose a song and save it here."
+                                  : "Press Edit to describe the library, then start radio — or compose a song and save it here.")
+                } actions: {
+                    Button("Generate one song now") { model.generateOneForRadio(lib.id) }
+                        .disabled(!canRadio || model.isBusy)
+                }
+            } else {
+                List {
+                    ForEach(lib.categories, id: \.self) { cat in
+                        let rows = model.songs(in: lib.id, category: cat)
+                        if !rows.isEmpty {
+                            Section(cat) {
+                                ForEach(rows) { song in LibrarySongRow(song: song, showCategory: false) }
+                            }
+                        }
+                    }
+                }
+                HStack {
+                    Button("Generate one song now") { model.generateOneForRadio(lib.id) }
+                        .disabled(!canRadio || model.isBusy)
+                    if model.isBusy, !model.radioStatus.isEmpty {
+                        ProgressView().controlSize(.small)
+                        Text(model.stageText.isEmpty ? model.radioStatus : model.stageText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer()
+                    Button { model.playAll(items) } label: { Label("Play all", systemImage: "play.fill") }
+                        .disabled(items.isEmpty)
+                }
+                .padding(12)
+            }
+        }
+    }
+}
+
+struct LibrarySongRow: View {
+    @Environment(StudioModel.self) private var model
+    let song: Song
+    var showCategory = true
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button { model.togglePlay(song) } label: {
+                Image(systemName: model.isPlaying(song) ? "stop.circle.fill" : "play.circle")
+                    .font(.system(size: 18))
+                    .foregroundStyle(model.isPlaying(song) ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(song.title).fontWeight(model.isPlaying(song) ? .semibold : .regular)
+                    if song.source == "radio" {
+                        Image(systemName: "dot.radiowaves.left.and.right").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+                Text(song.style).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            if showCategory {
+                Text(model.index.placement(for: song.id).category).font(.caption).foregroundStyle(.tertiary)
+            }
+            Text(song.created.formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 2)
+        .contextMenu { SongContextMenu(song: song) }
+    }
+}
+
+struct LibraryEditSheet: View {
+    @Environment(StudioModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let libraryID: UUID
+
+    var body: some View {
+        let lib = model.library(libraryID) ?? MusicLibrary(name: "")
+        VStack(spacing: 0) {
+            Form {
+                Section("Library") {
+                    TextField("Name", text: Binding(get: { lib.name }, set: { var l = lib; l.name = $0; model.updateLibrary(l) }))
+                }
+                Section {
+                    TextEditor(text: Binding(get: { lib.description }, set: { var l = lib; l.description = $0; model.updateLibrary(l) }))
+                        .frame(minHeight: 90)
+                        .scrollContentBackground(.hidden)
+                    HStack {
+                        Button {
+                            model.refineStation(lib.id)
+                        } label: {
+                            if model.isRefiningStation { ProgressView().controlSize(.small).padding(.trailing, 4) }
+                            Text(lib.refinedDescription.isEmpty ? "Refine description" : "Refine again")
+                        }
+                        .disabled(model.isRefiningStation || model.claudeURL == nil || lib.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Spacer()
+                        Text("Claude turns this into a station brief the radio writes from.").font(.caption).foregroundStyle(.secondary)
+                    }
+                } header: { Text("Description") } footer: {
+                    Text("Genres, moods, instruments, vocal styles, lyric themes, languages, what to avoid.")
+                }
+                if !lib.refinedDescription.isEmpty {
+                    Section {
+                        TextEditor(text: Binding(get: { lib.refinedDescription }, set: { var l = lib; l.refinedDescription = $0; model.updateLibrary(l) }))
+                            .font(.callout)
+                            .frame(minHeight: 160)
+                            .scrollContentBackground(.hidden)
+                    } header: { Text("Station brief") } footer: {
+                        Text("Editable. The radio uses this instead of the description when it exists.")
+                    }
+                }
+                Section("Radio options") {
+                    Toggle("Fast drafts (8 steps, ~2× faster, lower quality)", isOn: Binding(get: { lib.radioFastDrafts }, set: { var l = lib; l.radioFastDrafts = $0; model.updateLibrary(l) }))
+                    Toggle("Play songs as they finish", isOn: Binding(get: { lib.radioAutoplay }, set: { var l = lib; l.radioAutoplay = $0; model.updateLibrary(l) }))
+                }
+            }
+            .formStyle(.grouped)
+            Divider()
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 640, height: 620)
+    }
+}
+
+// MARK: - Radio (on air) view
+
+struct RadioView: View {
+    @Environment(StudioModel.self) private var model
+    let library: MusicLibrary
+
+    var body: some View {
+        let lib = library
+        let items = model.songs(in: lib.id)
+        let nowPlaying = model.nowPlayingID.flatMap(model.song)
+        VStack(spacing: 0) {
+            // On-air header
+            HStack(spacing: 16) {
+                Image(systemName: "dot.radiowaves.left.and.right")
+                    .font(.system(size: 34))
+                    .foregroundStyle(.red)
+                    .symbolEffect(.variableColor.iterative, isActive: true)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text("ON AIR").font(.caption.bold()).foregroundStyle(.white)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(.red, in: Capsule())
+                        Text(lib.name).font(.title2.bold())
+                    }
+                    Text("\(model.radioCount) generated this session · \(items.count) in library")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("Auto-play", isOn: Binding(get: { lib.radioAutoplay }, set: { var l = lib; l.radioAutoplay = $0; model.updateLibrary(l) }))
+                    .toggleStyle(.switch).controlSize(.small)
+                Button(role: .destructive) {
+                    model.setRadio(false, for: lib.id)
+                } label: { Label("Stop radio", systemImage: "stop.fill") }
+            }
+            .padding(20)
+
+            // Generation status
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    if model.isBusy { ProgressView().controlSize(.small) }
+                    Text(model.radioStatus.isEmpty ? "Starting…" : model.radioStatus).font(.callout)
+                    Spacer()
+                }
+                if model.isGenerating {
+                    Text(model.stageText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    if let p = model.progress { ProgressView(value: p) } else { ProgressView().progressViewStyle(.linear) }
+                }
+                if let err = model.radioError {
+                    Label(err, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                }
+            }
+            .padding(.horizontal, 20).padding(.bottom, 14)
+
+            Divider()
+
+            // Now playing
+            HStack(spacing: 14) {
+                Button { model.playPrevious() } label: { Image(systemName: "backward.fill") }
+                    .buttonStyle(.plain).disabled(nowPlaying == nil)
+                Button {
+                    if nowPlaying != nil { model.togglePause() } else if let first = items.first { model.playAll(items) ; _ = first }
+                } label: {
+                    Image(systemName: nowPlaying == nil ? "play.circle.fill" : (model.isPaused ? "play.circle.fill" : "pause.circle.fill"))
+                        .font(.system(size: 36))
+                }
+                .buttonStyle(.plain).foregroundStyle(.tint).disabled(items.isEmpty)
+                Button { model.playNext() } label: { Image(systemName: "forward.fill") }
+                    .buttonStyle(.plain).disabled(nowPlaying == nil)
+                VStack(alignment: .leading, spacing: 2) {
+                    if let s = nowPlaying {
+                        Text(s.title).font(.headline)
+                        Text(s.style).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Text("\(fmt(model.playbackPosition)) / \(fmt(model.playbackDuration))")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                    } else {
+                        Text(items.isEmpty ? "Waiting for the first song…" : "Nothing playing").font(.headline).foregroundStyle(.secondary)
+                        Text(lib.radioAutoplay ? "Songs will start automatically as they finish." : "Turn on Auto-play or press play.")
+                            .font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 20).padding(.vertical, 14)
+            .background(.quaternary.opacity(0.3))
+
+            Divider()
+
+            // Songs, newest first
+            if items.isEmpty {
+                ContentUnavailableView("No songs yet", systemImage: "music.note.list",
+                                       description: Text("The first song appears here as soon as it's rendered."))
+            } else {
+                List(items) { song in LibrarySongRow(song: song) }
+            }
+        }
+    }
+
+    private func fmt(_ t: TimeInterval) -> String {
+        let s = Int(t.rounded())
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+
+// MARK: - Song player page
+
+struct EditingHeader: View {
+    @Environment(StudioModel.self) private var model
+    let song: Song
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "pencil").foregroundStyle(.tint)
+            Text("Editing “\(song.title)”").font(.headline)
+            Text("Change anything below, then Regenerate… to replace this song, or Generate to make a new one.")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Spacer()
+            Button("Done") { model.editingSongID = nil }.keyboardShortcut(.escape, modifiers: [])
+        }
+        .padding(.horizontal, 20).padding(.vertical, 10)
+        .background(.bar)
+    }
+}
+
+struct SongPlayerView: View {
+    @Environment(StudioModel.self) private var model
+    let song: Song
+    @State private var showScore = false
+    @State private var scrubbing = false
+    @State private var scrubValue: Double = 0
+
+    var body: some View {
+        let p = model.index.placement(for: song.id)
+        let meta = StudioMeta.load(from: song.directory)
+        let playing = model.isPlaying(song)
+        let duration = playing ? model.playbackDuration : (meta.map { _ in cachedDuration } ?? cachedDuration)
+        VStack(spacing: 0) {
+            // Header
+            HStack(alignment: .top, spacing: 16) {
+                Image(systemName: song.source == "radio" ? "dot.radiowaves.left.and.right" : "music.note")
+                    .font(.system(size: 30)).foregroundStyle(.tint)
+                    .frame(width: 44, height: 44)
+                    .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(song.title).font(.title2.bold())
+                    Text(song.style).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                    Label("\(model.library(p.library)?.name ?? "") › \(p.category)", systemImage: "folder")
+                        .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                    Text([
+                        meta.map { $0.mode == "off" ? "Direct" : ($0.mode == "melody" ? "Melody" : "Full score") },
+                        meta.map { $0.odeSteps <= 8 ? "Fast draft" : "Standard quality" },
+                        meta.map { "Seed \(String($0.seed))" },
+                        song.created.formatted(date: .abbreviated, time: .shortened),
+                    ].compactMap { $0 }.joined(separator: "  ·  "))
+                    .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 8) {
+                    Button { model.beginEditing(song) } label: { Label("Edit", systemImage: "pencil") }
+                        .help("Open the generation details (idea, style, lyrics, settings) to change and regenerate")
+                    HStack {
+                        Button("Export M4A…") { model.exportM4A(song) }
+                        Button("Score") { showScore = true }
+                            .disabled(!FileManager.default.fileExists(atPath: song.scoreURL.path))
+                        Button { model.revealInFinder(song) } label: { Image(systemName: "folder") }
+                            .help("Reveal in Finder")
+                    }
+                }
+            }
+            .padding(20)
+
+            // Transport + timeline
+            VStack(spacing: 8) {
+                HStack(spacing: 18) {
+                    Button { model.playPrevious() } label: { Image(systemName: "backward.fill").font(.title3) }
+                        .buttonStyle(.plain).disabled(!playing)
+                    Button {
+                        if playing { model.togglePause() } else { model.playInLibrary(song) }
+                    } label: {
+                        Image(systemName: playing && !model.isPaused ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 44))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.tint)
+                    Button { model.playNext() } label: { Image(systemName: "forward.fill").font(.title3) }
+                        .buttonStyle(.plain).disabled(!playing)
+                    Button { model.stop() } label: { Image(systemName: "stop.fill").font(.title3) }
+                        .buttonStyle(.plain).disabled(!playing)
+                    Spacer()
+                    if playing, model.isPaused { Text("Paused").font(.caption).foregroundStyle(.secondary) }
+                }
+                HStack(spacing: 10) {
+                    Text(fmt(playing ? (scrubbing ? scrubValue : model.playbackPosition) : 0))
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+                    Slider(
+                        value: Binding(
+                            get: { scrubbing ? scrubValue : (playing ? model.playbackPosition : 0) },
+                            set: { scrubValue = $0 }
+                        ),
+                        in: 0...max(duration, 1),
+                        onEditingChanged: { editing in
+                            scrubbing = editing
+                            if !editing {
+                                if playing { model.seek(to: scrubValue) }
+                                else { model.playInLibrary(song); model.seek(to: scrubValue) }
+                            }
+                        }
+                    )
+                    Text(fmt(duration)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 40, alignment: .leading)
+                }
+            }
+            .padding(.horizontal, 20).padding(.bottom, 16)
+
+            Divider()
+
+            // Lyrics / idea
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let m = meta, !m.idea.isEmpty, !m.idea.hasPrefix("Radio: ") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Idea").font(.caption.bold()).foregroundStyle(.secondary)
+                            Text(m.idea).font(.callout).textSelection(.enabled)
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Lyrics").font(.caption.bold()).foregroundStyle(.secondary)
+                        let text = meta?.lyrics ?? requestLyrics
+                        Text(text.isEmpty ? "(instrumental / no lyrics saved)" : text)
+                            .font(.body.monospaced())
+                            .foregroundStyle(text.isEmpty ? .tertiary : .primary)
+                            .textSelection(.enabled)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(20)
+            }
+        }
+        .sheet(isPresented: $showScore) {
+            TextSheet(title: "Score — \(song.title)", text: (try? String(contentsOf: song.scoreURL, encoding: .utf8)) ?? "")
+        }
+        .onAppear { loadDuration() }
+        .onChange(of: song.id) { _, _ in loadDuration() }
+    }
+
+    @State private var cachedDuration: Double = 0
+    private func loadDuration() {
+        cachedDuration = 0
+        let url = song.audioURL
+        Task.detached {
+            let asset = AVURLAsset(url: url)
+            let d = (try? await asset.load(.duration)).map { $0.seconds } ?? 0
+            await MainActor.run { cachedDuration = d.isFinite ? d : 0 }
+        }
+    }
+
+    private var requestLyrics: String {
+        guard let data = try? Data(contentsOf: song.directory.appendingPathComponent("request.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
+        return (json["lyrics"] as? String) ?? ""
+    }
+
+    private func fmt(_ t: TimeInterval) -> String {
+        let s = Int(t.rounded())
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+
+// MARK: - Global now-playing bar
+
+struct NowPlayingBar: View {
+    @Environment(StudioModel.self) private var model
+    let song: Song
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "speaker.wave.2.fill").foregroundStyle(.tint)
+                .symbolEffect(.variableColor.iterative, isActive: !model.isPaused)
+            Button {
+                model.selection = .song(song.id)
+            } label: {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(song.title).font(.callout.weight(.semibold)).lineLimit(1)
+                    Text("\(model.library(model.index.placement(for: song.id).library)?.name ?? "") · \(fmt(model.playbackPosition)) / \(fmt(model.playbackDuration))")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            .buttonStyle(.plain)
+            .help("Show this song")
+            ProgressView(value: model.playbackDuration > 0 ? model.playbackPosition / model.playbackDuration : 0)
+                .frame(maxWidth: 220)
+            Spacer()
+            Button { model.playPrevious() } label: { Image(systemName: "backward.fill") }.buttonStyle(.plain)
+            Button { model.togglePause() } label: { Image(systemName: model.isPaused ? "play.fill" : "pause.fill").frame(width: 16) }.buttonStyle(.plain)
+            Button { model.stop() } label: { Image(systemName: "stop.fill") }.buttonStyle(.plain)
+            Button { model.playNext() } label: { Image(systemName: "forward.fill") }.buttonStyle(.plain)
+        }
+        .padding(.horizontal, 20).padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    private func fmt(_ t: TimeInterval) -> String {
+        let s = Int(t.rounded())
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+// MARK: - Playlist detail
+
+struct PlaylistView: View {
+    @Environment(StudioModel.self) private var model
+    let playlist: Playlist
+
+    var body: some View {
+        let items = model.songs(in: playlist)
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Image(systemName: "music.note.list").font(.system(size: 30)).foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(playlist.name).font(.title2.bold())
+                    Text("\(items.count) song\(items.count == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if model.isPlaying, let id = model.nowPlayingID, playlist.songIDs.contains(id) {
+                    Button { model.playPrevious() } label: { Image(systemName: "backward.fill") }
+                    Button { model.stop() } label: { Image(systemName: "stop.fill") }
+                    Button { model.playNext() } label: { Image(systemName: "forward.fill") }
+                } else {
+                    Button { model.playAll(items) } label: { Label("Play all", systemImage: "play.fill") }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(items.isEmpty)
+                }
+            }
+            .padding(20)
+            Divider()
+            if items.isEmpty {
+                ContentUnavailableView("Empty playlist", systemImage: "music.note.list",
+                                       description: Text("Right-click a song in a library and choose “Add to playlist”."))
+            } else {
+                List {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { i, song in
+                        HStack(spacing: 12) {
+                            Button { model.playAll(items, from: i) } label: {
+                                Image(systemName: model.isPlaying(song) ? "speaker.wave.2.fill" : "play.circle")
+                                    .foregroundStyle(model.isPlaying(song) ? Color.accentColor : .secondary)
+                            }
+                            .buttonStyle(.plain)
+                            Text("\(i + 1)").font(.caption.monospacedDigit()).foregroundStyle(.tertiary).frame(width: 22, alignment: .trailing)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(song.title).fontWeight(model.isPlaying(song) ? .semibold : .regular)
+                                Text(song.style).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer()
+                            let p = model.index.placement(for: song.id)
+                            Text("\(model.library(p.library)?.name ?? "") › \(p.category)").font(.caption).foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 2)
+                        .contextMenu {
+                            Button("Open in composer") { model.selection = .song(song.id) }
+                            Button("Remove from playlist") {
+                                if let idx = playlist.songIDs.firstIndex(of: song.id) {
+                                    model.removeFromPlaylist(playlist.id, at: IndexSet(integer: idx))
+                                }
+                            }
+                        }
+                    }
+                    .onMove { from, to in model.movePlaylistSongs(playlist.id, from: from, to: to) }
+                    .onDelete { offsets in model.removeFromPlaylist(playlist.id, at: offsets) }
+                }
+                Text("Drag to reorder · ⌫ to remove").font(.caption).foregroundStyle(.tertiary).padding(8)
+            }
+        }
+    }
+}
+
+// MARK: - Composer form
+
+struct ComposerView: View {
+    @Environment(StudioModel.self) private var model
+    @State private var showFind = false
+    @State private var findText = ""
+    @State private var replaceText = ""
+    @State private var caseSensitive = false
+
+    var body: some View {
+        @Bindable var model = model
+        Form {
+            Section {
+                ZStack(alignment: .topLeading) {
+                    if model.idea.isEmpty {
+                        Text("A funny country song about space truckers in the year 2526…")
+                            .foregroundStyle(.tertiary)
+                            .padding(.top, 8).padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: $model.idea)
+                        .frame(minHeight: 70)
+                        .scrollContentBackground(.hidden)
+                }
+                HStack {
+                    Button("Refine prompt") { model.refineIdea() }
+                        .disabled(!model.canUseIdea)
+                    Button("Write song") { model.writeSong(thenGenerate: false) }
+                        .disabled(!model.canUseIdea)
+                        .help("Fills in Title, Style and Lyrics below so you can review them first")
+                    Button("Write & generate") { model.writeSong(thenGenerate: true) }
+                        .disabled(!model.canUseIdea || model.setupProblem != nil)
+                        .buttonStyle(.borderedProminent)
+                    Spacer()
+                    if model.claudeURL == nil {
+                        Label("claude CLI not found", systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            } header: {
+                Text("Idea")
+            } footer: {
+                Text("Describe the song in plain English. Claude (via your Claude Code login) turns it into a title, a style line and full lyrics.")
+            }
+
+            Section {
+                TextField("Title", text: $model.title, prompt: Text("Night Shift"))
+                TextField("Style", text: $model.style, prompt: Text("English, synthwave pop, driving analog bass, confident male vocal, 112 BPM"), axis: .vertical)
+                    .lineLimit(2...4)
+            } header: {
+                Text("Song")
+            } footer: {
+                Text("Describe language, genre, vocal, instruments, mood and tempo. Be specific — the style line does most of the work.")
+            }
+
+            Section {
+                if showFind {
+                    HStack(spacing: 8) {
+                        TextField("Find", text: $findText).textFieldStyle(.roundedBorder)
+                        Image(systemName: "arrow.right").foregroundStyle(.secondary)
+                        TextField("Replace with", text: $replaceText).textFieldStyle(.roundedBorder)
+                        Toggle("Aa", isOn: $caseSensitive).toggleStyle(.button).help("Match case")
+                        let n = model.countMatches(findText, caseSensitive: caseSensitive)
+                        Text(findText.isEmpty ? "" : "\(n) match\(n == 1 ? "" : "es")")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 80, alignment: .leading)
+                        Button("Replace all") { model.replaceAll(findText, with: replaceText, caseSensitive: caseSensitive) }
+                            .disabled(n == 0)
+                            .keyboardShortcut(.return, modifiers: [.command, .shift])
+                    }
+                }
+                ZStack(alignment: .topLeading) {
+                    if model.lyrics.isEmpty {
+                        Text("[Verse]\nFirst line here…\n\n[Chorus]\n…\n\nLeave empty (or use only section tags like [Intro]) for an instrumental.")
+                            .foregroundStyle(.tertiary)
+                            .padding(.top, 8).padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: $model.lyrics)
+                        .font(.body.monospaced())
+                        .frame(minHeight: 180)
+                        .scrollContentBackground(.hidden)
+                }
+            } header: {
+                HStack {
+                    Text("Lyrics")
+                    Spacer()
+                    Button {
+                        showFind.toggle()
+                    } label: {
+                        Label("Find & Replace", systemImage: "magnifyingglass")
+                    }
+                    .buttonStyle(.borderless)
+                    .keyboardShortcut("f", modifiers: [.command, .option])
+                }
+            }
+
+            Section("Generation") {
+                Picker("Save to library", selection: Binding(
+                    get: { model.resolvedTargetLibrary.id },
+                    set: { model.targetLibraryID = $0 }
+                )) {
+                    ForEach(model.libraries) { l in Text(l.name).tag(l.id) }
+                }
+                Picker("Mode", selection: $model.mode) {
+                    ForEach(SongMode.allCases) { m in Text(m.label).tag(m) }
+                }
+                .pickerStyle(.segmented)
+                Text(model.mode.help).font(.caption).foregroundStyle(.secondary)
+
+                Toggle("Fast draft (8 steps, lower quality, ~2× faster)", isOn: $model.fastDraft)
+                TextField("Seed", text: $model.seedText, prompt: Text("random"))
+                    .frame(maxWidth: 220)
+                Toggle("Allow running on battery", isOn: $model.allowBattery)
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(model.isBusy)
+    }
+}
+
+// MARK: - Status / generate bar
+
+struct StatusBar: View {
+    @Environment(StudioModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(model.stageText.isEmpty ? "Ready" : model.stageText)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .foregroundStyle(model.stageText == "Failed" ? .red : .primary)
+                if model.isBusy {
+                    if let p = model.progress {
+                        ProgressView(value: p).progressViewStyle(.linear)
+                    } else {
+                        ProgressView().progressViewStyle(.linear)
+                    }
+                }
+            }
+            Spacer()
+            if model.isBusy {
+                Button(model.radioLibraryID != nil ? "Stop radio" : "Cancel", role: .cancel) { model.cancel() }
+                    .keyboardShortcut(".", modifiers: .command)
+            } else {
+                Button {
+                    model.generate()
+                } label: {
+                    Label("Generate", systemImage: "waveform.badge.plus")
+                        .frame(minWidth: 110)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!model.canGenerate)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(.bar)
+    }
+}
+
+// MARK: - Selected song panel
+
+struct SongPanel: View {
+    @Environment(StudioModel.self) private var model
+    let song: Song
+    @State private var showScore = false
+    @State private var showLog = false
+    @State private var confirmRegenerate = false
+
+    var body: some View {
+        let p = model.index.placement(for: song.id)
+        HStack(spacing: 16) {
+            Button {
+                model.togglePlay(song)
+            } label: {
+                Image(systemName: model.isPlaying(song) ? "stop.circle.fill" : "play.circle.fill")
+                    .font(.system(size: 34))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tint)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(song.title).font(.headline)
+                Text(song.style).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text("\(model.library(p.library)?.name ?? "") › \(p.category)")
+                    if song.source == "radio" { Label("radio", systemImage: "dot.radiowaves.left.and.right") }
+                    if model.isPlaying(song) {
+                        Text("· \(fmt(model.playbackPosition)) / \(fmt(model.playbackDuration))").monospacedDigit()
+                    }
+                }
+                .font(.caption).foregroundStyle(.tertiary).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+            }
+            Spacer()
+            Button("Load") { model.loadIntoForm(song) }
+                .help("Restore this song's idea, style, lyrics, seed and settings into the composer")
+            Button("Regenerate…") { confirmRegenerate = true }
+                .disabled(!model.canGenerate)
+                .help("Re-render from the composer and replace this song")
+            Button("Score") { showScore = true }
+                .disabled(!FileManager.default.fileExists(atPath: song.scoreURL.path))
+            Button("Export M4A…") { model.exportM4A(song) }
+            Button {
+                model.revealInFinder(song)
+            } label: { Image(systemName: "folder") }
+                .help("Reveal in Finder")
+            if !model.log.isEmpty {
+                Button { showLog = true } label: { Image(systemName: "doc.text") }
+                    .help("Show last generation log")
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .confirmationDialog("Replace “\(song.title)”?", isPresented: $confirmRegenerate, titleVisibility: .visible) {
+            Button("Regenerate and replace") { model.regenerate(replacing: song) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Renders a new version using the composer's current Title, Style and Lyrics, then replaces this song's audio. It keeps its library, category and playlists. The old audio goes to the Trash.")
+        }
+        .sheet(isPresented: $showScore) {
+            TextSheet(title: "Score — \(song.title)", text: (try? String(contentsOf: song.scoreURL, encoding: .utf8)) ?? "")
+        }
+        .sheet(isPresented: $showLog) {
+            TextSheet(title: "Generation log", text: model.log)
+        }
+    }
+
+    private func fmt(_ t: TimeInterval) -> String {
+        let s = Int(t.rounded())
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+struct TextSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.headline)
+            ScrollView {
+                Text(text)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 640, height: 480)
+    }
+}
+
+struct Banner: View {
+    let text: String
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage).foregroundStyle(tint)
+            Text(text).font(.callout)
+            Spacer()
+        }
+        .padding(.horizontal, 20).padding(.vertical, 10)
+        .background(tint.opacity(0.12))
+    }
+}
+
+// MARK: - Settings
+
+struct SettingsView: View {
+    @Environment(StudioModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        Form {
+            LabeledContent("Project folder") {
+                HStack {
+                    Text(model.projectDir.path).lineLimit(1).truncationMode(.middle)
+                    Button("Choose…") { pick(for: \.projectDir) }
+                }
+            }
+            LabeledContent("Songs folder") {
+                HStack {
+                    Text(model.outputRoot.path).lineLimit(1).truncationMode(.middle)
+                    Button("Choose…") { pick(for: \.outputRoot) }
+                }
+            }
+            if let problem = model.setupProblem {
+                Text(problem).font(.caption).foregroundStyle(.orange)
+            } else {
+                Label("mlx-Yue runtime and weights found", systemImage: "checkmark.circle.fill")
+                    .font(.caption).foregroundStyle(.green)
+            }
+
+            Section("Claude (song writing)") {
+                TextField("claude CLI path", text: $model.claudePathOverride, prompt: Text("auto-detect"))
+                TextField("Model", text: $model.claudeModel, prompt: Text("claude-opus-5"))
+                if let url = model.claudeURL {
+                    Label("Using \(url.path) with your Claude Code login", systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(.green)
+                } else {
+                    Text("claude CLI not found. Install Claude Code and run `claude` once to log in.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 520)
+        .padding()
+    }
+
+    private func pick(for key: ReferenceWritableKeyPath<StudioModel, URL>) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.directoryURL = model[keyPath: key]
+        if panel.runModal() == .OK, let url = panel.url {
+            model[keyPath: key] = url
+        }
+    }
+}

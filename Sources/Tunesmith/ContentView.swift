@@ -316,12 +316,17 @@ struct LibrarySummary: View {
                 Spacer()
                 VStack(alignment: .trailing, spacing: 8) {
                     Button { showEdit = true } label: { Label("Edit", systemImage: "pencil") }
-                    Button {
-                        model.setRadio(true, for: lib.id)
-                    } label: { Label("Start radio", systemImage: "dot.radiowaves.left.and.right") }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!canRadio || model.isBusy)
-                        .help(canRadio ? "Continuously write, render and file new songs for this library" : "Add a description (Edit) first")
+                    HStack(spacing: 8) {
+                        Button { model.playShuffled(items) } label: { Label("Shuffle", systemImage: "shuffle") }
+                            .disabled(items.isEmpty)
+                            .help("Play everything in this library in a random order")
+                        Button {
+                            model.setRadio(true, for: lib.id)
+                        } label: { Label("Start radio", systemImage: "dot.radiowaves.left.and.right") }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!canRadio || model.isBusy)
+                            .help(canRadio ? "Continuously write, render and file new songs for this library" : "Add a description (Edit) first")
+                    }
                 }
             }
             .padding(20)

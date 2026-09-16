@@ -6,8 +6,9 @@ A native macOS app for generating original songs locally with [YuE2](https://git
 
 - **Composer** — idea → *Refine prompt* → *Write song* (title, style line, lyrics) → *Generate*. Full score / melody / direct modes, fast-draft toggle, seeds, lyrics find & replace.
 - **Libraries › Categories › Songs** with playlists (drag to reorder, sequential playback).
+- **Playback** — play a library, a category or a playlist in order or **shuffled**. Shuffle sits next to *Start radio* on a library page, next to *Play all* on a playlist, and in the right-click menu of any library, category or playlist. While something is playing, the shuffle button in the now-playing bar and the player transport reshuffles only what is still to come, leaving the current track alone.
 - **Radio** — describe a library, refine it into a station brief, turn on radio: Claude keeps writing new songs that fit, YuE2 renders them one after another, and each is auto-filed into a matching category (created on demand). With Auto-play on the station never goes silent — while the next song renders it airs random songs from the same library, and the fresh song goes on the air as soon as the current track ends. Stopping the station lets the song already rendering finish and file itself.
-- **Song player** — timeline scrubber, transport, lyrics; *Edit* reopens the exact generation details (saved as `studio.json` with every song) to tweak and *Regenerate* in place.
+- **Song player** — timeline scrubber, transport, lyrics; *Edit* reopens the exact generation details (saved as `studio.json` with every song) to tweak and *Regenerate* in place. Every song gets its own cover art, generated from a hash of its id, so it looks the same everywhere it appears.
 - Export to M4A, view the ABC score, reveal in Finder.
 - **Share via email** — sends the song as an M4A attachment (with its style and, optionally, lyrics and a note) through [Remail](https://remail.foo). Add your Remail API key, From address (must be on a verified Remail domain) and optional Reply-to in Settings › Email sharing; *Check connection* runs Remail's account status. The key is stored in the login Keychain.
 
@@ -34,6 +35,14 @@ A native macOS app for generating original songs locally with [YuE2](https://git
 Builds a release binary, wraps it as `Tunesmith.app`, ad-hoc signs it, and installs it to `~/Applications`.
 
 Songs and library metadata live in `~/Music/Tunesmith/` (changeable in Settings). An existing `~/Music/YuE2 Studio/` from before the rename keeps being used as-is.
+
+### Rebuilding on every save
+
+```bash
+scripts/autobuild-toggle.sh on     # off | status
+```
+
+Loads a launchd agent that checks every 15s whether anything under `Sources/`, `Package.swift`, `Info.plist`, `make-icon.swift` or `build.sh` has changed since the last successful build, and if so reruns `build.sh`. A failed build leaves the installed app alone. Log: `~/Library/Logs/tunesmith-autobuild.log`. An app that is already running keeps its old code until you quit and reopen it.
 
 ## License note
 

@@ -1,11 +1,11 @@
 import SwiftUI
 
 @main
-struct YuE2StudioApp: App {
+struct TunesmithApp: App {
     @State private var model = StudioModel()
 
     var body: some Scene {
-        WindowGroup("YuE2 Studio") {
+        WindowGroup("Tunesmith") {
             ContentView()
                 .environment(model)
                 .frame(minWidth: 900, minHeight: 620)

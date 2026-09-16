@@ -21,7 +21,7 @@ enum SongWriter {
     """
 
     static let refineStationSystem = """
-    You design radio stations for YuE2 Studio, an app that generates original songs with a local \
+    You design radio stations for Tunesmith, an app that generates original songs with a local \
     text-to-music model. The user gives you a rough description of a music library. Turn it into a \
     station brief that a songwriter can use to write an endless, varied stream of songs that all belong \
     on this station.

@@ -40,6 +40,7 @@ struct ContentView: View {
                 }
             }
         }
+        .sheet(item: $model.sharingSong) { song in ShareEmailSheet(song: song) }
         .alert("Something went wrong", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -152,7 +153,7 @@ struct SidebarView: View {
         .toolbar {
             ToolbarItem {
                 Button { model.newSong() } label: { Label("New Song", systemImage: "square.and.pencil") }
-                    .help("Open the composer for a new song (⌘N)")
+                    .help("Start a new song in a blank composer (⌘N)")
             }
             ToolbarItem {
                 Menu {
@@ -256,6 +257,7 @@ struct SongContextMenu: View {
             }
         }
         Divider()
+        Button("Share via Email…") { model.sharingSong = song }
         Button("Reveal in Finder") { model.revealInFinder(song) }
         Button("Move to Trash", role: .destructive) { model.deleteSong(song) }
     }
@@ -320,6 +322,21 @@ struct LibrarySummary: View {
                 }
             }
             .padding(20)
+            if model.radioWindingDown == lib.id {
+                Divider()
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.radioStatus.isEmpty ? "Finishing the last song…" : model.radioStatus)
+                            .font(.caption).lineLimit(1)
+                        if let p = model.progress { ProgressView(value: p).frame(width: 220) }
+                    }
+                    Spacer()
+                    Button("Cancel") { model.cancel() }.controlSize(.small)
+                }
+                .padding(.horizontal, 20).padding(.vertical, 8)
+                .background(.quaternary.opacity(0.3))
+            }
             Divider()
             if items.isEmpty {
                 ContentUnavailableView {
@@ -434,7 +451,8 @@ struct LibraryEditSheet: View {
                 }
                 Section("Radio options") {
                     Toggle("Fast drafts (8 steps, ~2× faster, lower quality)", isOn: Binding(get: { lib.radioFastDrafts }, set: { var l = lib; l.radioFastDrafts = $0; model.updateLibrary(l) }))
-                    Toggle("Play songs as they finish", isOn: Binding(get: { lib.radioAutoplay }, set: { var l = lib; l.radioAutoplay = $0; model.updateLibrary(l) }))
+                    Toggle("Keep the station playing (new songs on air as they finish, library songs in between)",
+                           isOn: Binding(get: { lib.radioAutoplay }, set: { var l = lib; l.radioAutoplay = $0; model.updateLibrary(l) }))
                 }
             }
             .formStyle(.grouped)
@@ -454,101 +472,342 @@ struct LibraryEditSheet: View {
 struct RadioView: View {
     @Environment(StudioModel.self) private var model
     let library: MusicLibrary
+    @State private var scrubbing = false
+    @State private var scrubValue: Double = 0
+
+    private var nowPlaying: Song? { model.nowPlayingID.flatMap(model.song) }
+    private var isLive: Bool { model.isPlaying && !model.isPaused }
 
     var body: some View {
-        let lib = library
-        let items = model.songs(in: lib.id)
-        let nowPlaying = model.nowPlayingID.flatMap(model.song)
+        let items = model.songs(in: library.id)
         VStack(spacing: 0) {
-            // On-air header
-            HStack(spacing: 16) {
-                Image(systemName: "dot.radiowaves.left.and.right")
-                    .font(.system(size: 34))
-                    .foregroundStyle(.red)
-                    .symbolEffect(.variableColor.iterative, isActive: true)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 8) {
-                        Text("ON AIR").font(.caption.bold()).foregroundStyle(.white)
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(.red, in: Capsule())
-                        Text(lib.name).font(.title2.bold())
-                    }
-                    Text("\(model.radioCount) generated this session · \(items.count) in library")
-                        .font(.caption).foregroundStyle(.secondary)
+            header(items)
+            Divider()
+            deck(items)
+            if let err = model.radioError {
+                Label(err, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20).padding(.vertical, 7)
+                    .background(.orange.opacity(0.1))
+            }
+            Divider()
+            if items.isEmpty {
+                ContentUnavailableView("No songs yet", systemImage: "music.note.list",
+                                       description: Text("The first song goes on the air as soon as it's rendered."))
+            } else {
+                List(items) { song in RadioSongRow(song: song) }
+            }
+        }
+    }
+
+    // MARK: Header
+
+    private func header(_ items: [Song]) -> some View {
+        let lib = library
+        let cats = max(0, lib.categories.count - 1)
+        return HStack(spacing: 16) {
+            Artwork(seed: lib.name, size: 66, glyph: "dot.radiowaves.left.and.right", playing: isLive)
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 9) {
+                    OnAirPill()
+                    Text(lib.name).font(.title2.bold())
                 }
-                Spacer()
-                Toggle("Auto-play", isOn: Binding(get: { lib.radioAutoplay }, set: { var l = lib; l.radioAutoplay = $0; model.updateLibrary(l) }))
+                HStack(spacing: 6) {
+                    StatChip(icon: "waveform.badge.plus", text: "\(model.radioCount) this session")
+                    StatChip(icon: "music.note", text: "\(items.count) in library")
+                    StatChip(icon: "folder", text: "\(cats) categor\(cats == 1 ? "y" : "ies")")
+                }
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 10) {
+                Toggle("Auto-play", isOn: Binding(get: { lib.radioAutoplay },
+                                                  set: { var l = lib; l.radioAutoplay = $0; model.updateLibrary(l) }))
                     .toggleStyle(.switch).controlSize(.small)
+                    .help("Keeps the station playing: new songs go on air as they finish, library songs fill the gaps")
                 Button(role: .destructive) {
                     model.setRadio(false, for: lib.id)
                 } label: { Label("Stop radio", systemImage: "stop.fill") }
-            }
-            .padding(20)
-
-            // Generation status
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    if model.isBusy { ProgressView().controlSize(.small) }
-                    Text(model.radioStatus.isEmpty ? "Starting…" : model.radioStatus).font(.callout)
-                    Spacer()
-                }
-                if model.isGenerating {
-                    Text(model.stageText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    if let p = model.progress { ProgressView(value: p) } else { ProgressView().progressViewStyle(.linear) }
-                }
-                if let err = model.radioError {
-                    Label(err, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
-                }
-            }
-            .padding(.horizontal, 20).padding(.bottom, 14)
-
-            Divider()
-
-            // Now playing
-            HStack(spacing: 14) {
-                Button { model.playPrevious() } label: { Image(systemName: "backward.fill") }
-                    .buttonStyle(.plain).disabled(nowPlaying == nil)
-                Button {
-                    if nowPlaying != nil { model.togglePause() } else if let first = items.first { model.playAll(items) ; _ = first }
-                } label: {
-                    Image(systemName: nowPlaying == nil ? "play.circle.fill" : (model.isPaused ? "play.circle.fill" : "pause.circle.fill"))
-                        .font(.system(size: 36))
-                }
-                .buttonStyle(.plain).foregroundStyle(.tint).disabled(items.isEmpty)
-                Button { model.playNext() } label: { Image(systemName: "forward.fill") }
-                    .buttonStyle(.plain).disabled(nowPlaying == nil)
-                VStack(alignment: .leading, spacing: 2) {
-                    if let s = nowPlaying {
-                        Text(s.title).font(.headline)
-                        Text(s.style).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                        Text("\(fmt(model.playbackPosition)) / \(fmt(model.playbackDuration))")
-                            .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
-                    } else {
-                        Text(items.isEmpty ? "Waiting for the first song…" : "Nothing playing").font(.headline).foregroundStyle(.secondary)
-                        Text(lib.radioAutoplay ? "Songs will start automatically as they finish." : "Turn on Auto-play or press play.")
-                            .font(.caption).foregroundStyle(.tertiary)
-                    }
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 20).padding(.vertical, 14)
-            .background(.quaternary.opacity(0.3))
-
-            Divider()
-
-            // Songs, newest first
-            if items.isEmpty {
-                ContentUnavailableView("No songs yet", systemImage: "music.note.list",
-                                       description: Text("The first song appears here as soon as it's rendered."))
-            } else {
-                List(items) { song in LibrarySongRow(song: song) }
+                    .help("Stops writing new songs. Anything already rendering finishes and is filed.")
             }
         }
+        .padding(20)
+        .background(backdrop)
+    }
+
+    private var backdrop: some View {
+        let h = Double(stableHash(library.name) % 1000) / 1000
+        return LinearGradient(colors: [Color(hue: h, saturation: 0.45, brightness: 0.75).opacity(0.22),
+                                       Color(hue: h, saturation: 0.45, brightness: 0.75).opacity(0.02)],
+                              startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    // MARK: Deck
+
+    private func deck(_ items: [Song]) -> some View {
+        HStack(alignment: .top, spacing: 18) {
+            nowPlayingPane(items)
+            Divider().frame(height: 118)
+            upNextPane().frame(width: 235, height: 118, alignment: .topLeading)
+        }
+        .padding(.horizontal, 20).padding(.vertical, 16)
+        .background(.quaternary.opacity(0.22))
+    }
+
+    private func nowPlayingPane(_ items: [Song]) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            ZStack(alignment: .bottomLeading) {
+                Artwork(seed: nowPlaying?.id ?? library.name + "-idle", size: 118,
+                        glyph: nowPlaying == nil ? "music.note" : "waveform", playing: isLive)
+                if nowPlaying != nil {
+                    EQBars(bars: 5, active: isLive, height: 20)
+                        .padding(7)
+                        .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 7))
+                        .padding(8)
+                }
+            }
+            VStack(alignment: .leading, spacing: 7) {
+                if let s = nowPlaying {
+                    Text(s.title).font(.title3.bold()).lineLimit(1)
+                    Text(s.style).font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(2).frame(height: 26, alignment: .top)
+                } else {
+                    Text(items.isEmpty ? "Waiting for the first song…" : "Nothing playing")
+                        .font(.title3.bold()).foregroundStyle(.secondary)
+                    Text(library.radioAutoplay ? "New songs go on air as they finish; library songs fill the gaps."
+                                               : "Turn on Auto-play, or press play.")
+                        .font(.caption).foregroundStyle(.tertiary)
+                        .lineLimit(2).frame(height: 26, alignment: .top)
+                }
+                scrubber
+                transport(items)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var scrubber: some View {
+        let live = nowPlaying != nil
+        return HStack(spacing: 9) {
+            Text(fmt(live ? (scrubbing ? scrubValue : model.playbackPosition) : 0))
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                .frame(width: 38, alignment: .trailing)
+            Slider(value: Binding(get: { scrubbing ? scrubValue : (live ? model.playbackPosition : 0) },
+                                  set: { scrubValue = $0 }),
+                   in: 0...max(model.playbackDuration, 1)) { editing in
+                scrubbing = editing
+                if !editing { model.seek(to: scrubValue) }
+            }
+            .disabled(!live)
+            Text(fmt(live ? model.playbackDuration : 0))
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                .frame(width: 38, alignment: .leading)
+        }
+    }
+
+    private func transport(_ items: [Song]) -> some View {
+        HStack(spacing: 16) {
+            Button { model.playPrevious() } label: { Image(systemName: "backward.fill") }
+                .buttonStyle(.plain).disabled(nowPlaying == nil)
+            Button {
+                if nowPlaying != nil { model.togglePause() } else { model.playAll(items) }
+            } label: {
+                Image(systemName: (nowPlaying == nil || model.isPaused) ? "play.circle.fill" : "pause.circle.fill")
+                    .font(.system(size: 34))
+            }
+            .buttonStyle(.plain).foregroundStyle(.tint).disabled(items.isEmpty)
+            Button { model.playNext() } label: { Image(systemName: "forward.fill") }
+                .buttonStyle(.plain).disabled(nowPlaying == nil)
+                .help("Skip — airs the new song if one is ready, otherwise another from the library")
+            if nowPlaying != nil, model.isPaused {
+                Text("Paused").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+    }
+
+    // MARK: Up next
+
+    @ViewBuilder
+    private func upNextPane() -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("UP NEXT").font(.caption2.bold()).tracking(1.1).foregroundStyle(.tertiary)
+            if let up = model.radioUpNext {
+                HStack(spacing: 10) {
+                    Artwork(seed: up.id, size: 42)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("NEW").font(.caption2.bold()).foregroundStyle(.white)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(.green, in: Capsule())
+                        Text(up.title).font(.callout.weight(.semibold)).lineLimit(2)
+                    }
+                }
+                Text(model.isPlaying ? "Goes on air when this song ends." : "Starting…")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            } else if model.isBusy {
+                Text(model.renderingTitle ?? "Writing the next song…")
+                    .font(.callout.weight(.semibold)).lineLimit(2)
+                RenderingMeter(progress: model.progress, active: true)
+                Text(model.stageText.isEmpty ? model.radioStatus : model.stageText)
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+            } else {
+                Text(model.radioStatus.isEmpty ? "Cueing up the next song…" : model.radioStatus)
+                    .font(.callout).foregroundStyle(.secondary).lineLimit(2)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func fmt(_ t: TimeInterval) -> String {
         let s = Int(t.rounded())
         return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+struct RadioSongRow: View {
+    @Environment(StudioModel.self) private var model
+    let song: Song
+
+    var body: some View {
+        let playing = model.isPlaying(song)
+        HStack(spacing: 12) {
+            ZStack {
+                Artwork(seed: song.id, size: 34)
+                if playing {
+                    Color.black.opacity(0.3).clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    EQBars(bars: 3, active: !model.isPaused, height: 13)
+                }
+            }
+            .frame(width: 34, height: 34)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(song.title).fontWeight(playing ? .semibold : .regular).lineLimit(1)
+                Text(song.style).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            Text(model.index.placement(for: song.id).category).font(.caption).foregroundStyle(.tertiary)
+            Text(song.created.formatted(date: .omitted, time: .shortened))
+                .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+            Button { model.togglePlay(song) } label: {
+                Image(systemName: playing ? "stop.fill" : "play.fill")
+            }
+            .buttonStyle(.plain).foregroundStyle(playing ? Color.accentColor : .secondary)
+        }
+        .padding(.vertical, 3)
+        .contextMenu { SongContextMenu(song: song) }
+    }
+}
+
+// MARK: - Visual bits
+
+/// FNV-1a: stable across launches, unlike Swift's per-process seeded hashValue.
+func stableHash(_ s: String) -> UInt64 {
+    var h: UInt64 = 0xcbf2_9ce4_8422_2325
+    for b in s.utf8 { h = (h ^ UInt64(b)) &* 0x100_0000_01b3 }
+    return h
+}
+
+/// Deterministic cover art: a gradient tile with record grooves, seeded by the song id.
+struct Artwork: View {
+    let seed: String
+    var size: CGFloat = 56
+    var glyph = "music.note"
+    var playing = false
+
+    var body: some View {
+        let h = Double(stableHash(seed) % 1000) / 1000
+        let c1 = Color(hue: h, saturation: 0.5, brightness: 0.86)
+        let c2 = Color(hue: (h + 0.14).truncatingRemainder(dividingBy: 1), saturation: 0.85, brightness: 0.44)
+        let shape = RoundedRectangle(cornerRadius: size * 0.18, style: .continuous)
+        return shape
+            .fill(LinearGradient(colors: [c1, c2], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .frame(width: size, height: size)
+            .overlay {
+                ZStack {
+                    ForEach(1...3, id: \.self) { i in
+                        Circle()
+                            .strokeBorder(.white.opacity(0.13), lineWidth: max(1, size * 0.015))
+                            .frame(width: size * (0.3 + 0.24 * Double(i)))
+                    }
+                    Image(systemName: glyph)
+                        .font(.system(size: size * 0.26, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .shadow(color: .black.opacity(0.25), radius: size * 0.03)
+                }
+            }
+            .overlay(shape.strokeBorder(.white.opacity(0.16)))
+            .shadow(color: .black.opacity(0.2), radius: size * 0.05, y: size * 0.02)
+    }
+}
+
+/// Little animated level meter. Frozen (and not redrawing) when `active` is false.
+struct EQBars: View {
+    var bars = 4
+    var active = true
+    var height: CGFloat = 16
+    var tint: Color = .white
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24, paused: !active)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .bottom, spacing: 2.5) {
+                ForEach(0..<bars, id: \.self) { i in
+                    let wobble = abs(sin(t * (1.9 + Double(i) * 0.41) + Double(i) * 1.7))
+                    let f = active ? 0.22 + 0.78 * wobble : 0.22
+                    Capsule().fill(tint).frame(width: 3, height: max(2, height * f))
+                }
+            }
+            .frame(height: height, alignment: .bottom)
+        }
+    }
+}
+
+/// Pulsing ON AIR badge.
+struct OnAirPill: View {
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle().fill(.white).frame(width: 6, height: 6)
+                .phaseAnimator([0.2, 1.0]) { dot, p in dot.opacity(p) } animation: { _ in .easeInOut(duration: 0.85) }
+            Text("ON AIR").font(.caption.bold()).foregroundStyle(.white)
+        }
+        .padding(.horizontal, 7).padding(.vertical, 3)
+        .background(.red, in: Capsule())
+    }
+}
+
+struct StatChip: View {
+    let icon: String
+    let text: String
+
+    var body: some View {
+        Label(text, systemImage: icon)
+            .font(.caption).foregroundStyle(.secondary)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(.quaternary.opacity(0.5), in: Capsule())
+    }
+}
+
+/// Render progress as a strip of bars; shimmers while the step has no percentage yet.
+struct RenderingMeter: View {
+    var progress: Double?
+    var active = true
+    private let count = 20
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !active)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .bottom, spacing: 2) {
+                ForEach(0..<count, id: \.self) { i in
+                    let x = Double(i) / Double(count - 1)
+                    let lit = progress.map { x <= $0 } ?? (abs(sin(t * 1.3 - x * 3.0)) > 0.62)
+                    let h = 5 + 13 * abs(sin(t * 2.1 + Double(i) * 0.55))
+                    Capsule()
+                        .fill(lit ? Color.accentColor : Color.secondary.opacity(0.28))
+                        .frame(height: lit ? h : 5)
+                }
+            }
+            .frame(height: 18, alignment: .bottom)
+        }
     }
 }
 
@@ -610,6 +869,8 @@ struct SongPlayerView: View {
                     Button { model.beginEditing(song) } label: { Label("Edit", systemImage: "pencil") }
                         .help("Open the generation details (idea, style, lyrics, settings) to change and regenerate")
                     HStack {
+                        Button { model.sharingSong = song } label: { Label("Share", systemImage: "envelope") }
+                            .help("Email this song")
                         Button("Export M4A…") { model.exportM4A(song) }
                         Button("Score") { showScore = true }
                             .disabled(!FileManager.default.fileExists(atPath: song.scoreURL.path))
@@ -863,7 +1124,15 @@ struct ComposerView: View {
                     }
                 }
             } header: {
-                Text("Idea")
+                HStack {
+                    Text("Idea")
+                    Spacer()
+                    if !model.composerIsBlank {
+                        Button { model.newSong() } label: { Label("New song", systemImage: "square.and.pencil") }
+                            .buttonStyle(.borderless)
+                            .help("Clear the composer and start a new song (⌘N)")
+                    }
+                }
             } footer: {
                 Text("Describe the song in plain English. Claude (via your Claude Code login) turns it into a title, a style line and full lyrics.")
             }
@@ -965,7 +1234,11 @@ struct StatusBar: View {
             }
             Spacer()
             if model.isBusy {
-                Button(model.radioLibraryID != nil ? "Stop radio" : "Cancel", role: .cancel) { model.cancel() }
+                if let radioID = model.radioLibraryID {
+                    Button("Stop radio") { model.setRadio(false, for: radioID) }
+                        .help("Stops writing new songs; the one rendering now finishes and is filed")
+                }
+                Button(model.radioLibraryID != nil ? "Cancel render" : "Cancel", role: .cancel) { model.cancel() }
                     .keyboardShortcut(".", modifiers: .command)
             } else {
                 Button {
@@ -1028,6 +1301,8 @@ struct SongPanel: View {
             Button("Score") { showScore = true }
                 .disabled(!FileManager.default.fileExists(atPath: song.scoreURL.path))
             Button("Export M4A…") { model.exportM4A(song) }
+            Button { model.sharingSong = song } label: { Image(systemName: "envelope") }
+                .help("Share via Email")
             Button {
                 model.revealInFinder(song)
             } label: { Image(systemName: "folder") }
@@ -1084,6 +1359,89 @@ struct TextSheet: View {
     }
 }
 
+struct ShareEmailSheet: View {
+    @Environment(StudioModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let song: Song
+    @AppStorage("shareRecipients") private var to = ""
+    @State private var message = ""
+    @State private var includeLyrics = true
+    @State private var isSending = false
+    @State private var sentID: String? = nil
+    @State private var error: String? = nil
+
+    private var recipients: [String] {
+        to.split(whereSeparator: { ",; \n".contains($0) }).map(String.init).filter { !$0.isEmpty }
+    }
+    private var recipientsValid: Bool {
+        !recipients.isEmpty && recipients.count <= 50 && recipients.allSatisfy { r in
+            let parts = r.split(separator: "@")
+            return parts.count == 2 && parts[1].contains(".")
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Form {
+                Section {
+                    LabeledContent("Song", value: song.title)
+                    LabeledContent("From", value: model.remailFrom.isEmpty ? StudioModel.defaultRemailFrom : model.remailFrom)
+                    TextField("To", text: $to, prompt: Text("friend@example.com, another@example.com"))
+                    TextField("Message", text: $message, prompt: Text("optional note"), axis: .vertical)
+                        .lineLimit(3...8)
+                    Toggle("Include lyrics", isOn: $includeLyrics)
+                } footer: {
+                    Text("Attaches “\(song.title).m4a” (converted from FLAC).")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if model.remailAPIKey.isEmpty {
+                    Label("Add a Remail API key in Settings → Email sharing first.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                if let sentID {
+                    Label("Sent to \(recipients.joined(separator: ", ")) · id \(sentID)", systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(.green).textSelection(.enabled)
+                }
+                if let error {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                }
+            }
+            .formStyle(.grouped)
+            .disabled(isSending || sentID != nil)
+
+            HStack {
+                if isSending {
+                    ProgressView().controlSize(.small)
+                    Text("Converting and sending…").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if sentID != nil {
+                    Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                } else {
+                    Button("Cancel", role: .cancel) { dismiss() }.disabled(isSending)
+                    Button("Send") { send() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(isSending || !recipientsValid || model.remailAPIKey.isEmpty)
+                }
+            }
+            .padding(.horizontal, 20).padding(.bottom, 16)
+        }
+        .frame(width: 500)
+        .interactiveDismissDisabled(isSending)
+    }
+
+    private func send() {
+        isSending = true
+        error = nil
+        Task {
+            do { sentID = try await model.shareByEmail(song, to: recipients, message: message, includeLyrics: includeLyrics) }
+            catch { self.error = error.localizedDescription }
+            isSending = false
+        }
+    }
+}
+
 struct Banner: View {
     let text: String
     let systemImage: String
@@ -1104,6 +1462,18 @@ struct Banner: View {
 
 struct SettingsView: View {
     @Environment(StudioModel.self) private var model
+    @State private var remailChecking = false
+    @State private var remailStatus: (ok: Bool, text: String)? = nil
+
+    private func checkRemail() {
+        remailChecking = true
+        remailStatus = nil
+        Task {
+            do { remailStatus = (true, try await RemailClient(apiKey: model.remailAPIKey).accountStatus()) }
+            catch { remailStatus = (false, error.localizedDescription) }
+            remailChecking = false
+        }
+    }
 
     var body: some View {
         @Bindable var model = model
@@ -1136,6 +1506,21 @@ struct SettingsView: View {
                 } else {
                     Text("claude CLI not found. Install Claude Code and run `claude` once to log in.")
                         .font(.caption).foregroundStyle(.orange)
+                }
+            }
+
+            Section("Email sharing (Remail)") {
+                SecureField("API key", text: $model.remailAPIKey, prompt: Text("rk_…"))
+                TextField("From", text: $model.remailFrom, prompt: Text(StudioModel.defaultRemailFrom))
+                TextField("Reply-to", text: $model.remailReplyTo, prompt: Text("optional"))
+                HStack {
+                    Button("Check connection") { checkRemail() }
+                        .disabled(model.remailAPIKey.isEmpty || remailChecking)
+                    if remailChecking { ProgressView().controlSize(.small) }
+                }
+                if let status = remailStatus {
+                    Label(status.text, systemImage: status.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(status.ok ? .green : .orange)
                 }
             }
         }

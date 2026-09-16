@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>YuE2 Studio</string>
+    <string>Tunesmith</string>
     <key>CFBundleDisplayName</key>
-    <string>YuE2 Studio</string>
+    <string>Tunesmith</string>
     <key>CFBundleIdentifier</key>
-    <string>com.scott.yue2studio</string>
+    <string>com.scott.tunesmith</string>
     <key>CFBundleExecutable</key>
-    <string>YuE2Studio</string>
+    <string>Tunesmith</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
@@ -25,6 +25,6 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>Local YuE2 music generation via mlx-Yue.</string>
+    <string>Local song generation with YuE2 via mlx-Yue.</string>
 </dict>
 </plist>

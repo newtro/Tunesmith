@@ -67,6 +67,18 @@ final class StudioModel {
     var claudeModel: String {
         didSet { UserDefaults.standard.set(claudeModel, forKey: "claudeModel") }
     }
+    var remailAPIKey: String {
+        didSet { Keychain.set(remailAPIKey, service: Self.keychainService, account: "remail-api-key") }
+    }
+    var remailFrom: String {
+        didSet { UserDefaults.standard.set(remailFrom, forKey: "remailFrom") }
+    }
+    var remailReplyTo: String {
+        didSet { UserDefaults.standard.set(remailReplyTo, forKey: "remailReplyTo") }
+    }
+    /// Unchanged across the rename to Tunesmith so existing keychain items still resolve.
+    static let keychainService = "com.scott.yue2studio"
+    static let defaultRemailFrom = "Scott <scott@johnnycode.ai>"
 
     // MARK: Idea → song (Claude CLI)
     var idea = ""
@@ -108,14 +120,25 @@ final class StudioModel {
     var askNewCategory = false
     var askNewPlaylist = false
     var askNewLibrary = false
+    /// Song whose share-by-email sheet is open.
+    var sharingSong: Song? = nil
 
     // MARK: Radio
     var radioLibraryID: UUID? = nil
     var radioStatus = ""
     var radioCount = 0
     var radioError: String? = nil
+    /// Set when the station is switched off with a render still in flight — that song
+    /// is allowed to finish and file itself before the loop exits.
+    var radioWindingDown: UUID? = nil
+    /// Title of the song currently rendering, for "up next" UI.
+    var renderingTitle: String? = nil
     var isRefiningStation = false
     private var radioTask: Task<Void, Never>? = nil
+    /// Freshly rendered song waiting to go on the air after the current track.
+    private var radioPendingSongID: String? = nil
+    /// Recently aired ids, so the random filler doesn't repeat itself immediately.
+    private var radioRecentIDs: [String] = []
 
     // MARK: Playback
     var isPlaying = false
@@ -139,9 +162,12 @@ final class StudioModel {
         let savedProject = UserDefaults.standard.string(forKey: "projectDir")
         projectDir = URL(fileURLWithPath: savedProject ?? home.appendingPathComponent("repos/mlx-Yue").path)
         let savedOut = UserDefaults.standard.string(forKey: "outputRoot")
-        outputRoot = URL(fileURLWithPath: savedOut ?? home.appendingPathComponent("Music/YuE2 Studio").path)
+        outputRoot = URL(fileURLWithPath: savedOut ?? Self.defaultOutputRoot(home: home).path)
         claudePathOverride = UserDefaults.standard.string(forKey: "claudePath") ?? ""
         claudeModel = UserDefaults.standard.string(forKey: "claudeModel") ?? "claude-opus-5"
+        remailAPIKey = Keychain.get(service: Self.keychainService, account: "remail-api-key") ?? ""
+        remailFrom = UserDefaults.standard.string(forKey: "remailFrom") ?? Self.defaultRemailFrom
+        remailReplyTo = UserDefaults.standard.string(forKey: "remailReplyTo") ?? ""
         checkSetup()
         reloadIndex()
         refreshLibrary()
@@ -250,6 +276,7 @@ final class StudioModel {
     func updateLibrary(_ lib: MusicLibrary) {
         guard let i = index.libraries.firstIndex(where: { $0.id == lib.id }) else { return }
         index.libraries[i] = lib; saveIndex()
+        if isRadioOn(lib.id), lib.radioAutoplay, !isPlaying { radioPlayNext() }
     }
 
     func deleteLibrary(_ id: UUID) {
@@ -445,11 +472,58 @@ final class StudioModel {
             radioError = nil
             radioCount = 0
             radioStatus = "Starting…"
+            radioPendingSongID = nil
+            radioRecentIDs = []
             if radioTask == nil { radioTask = Task { await radioLoop() } }
+            // Don't wait for the first render — put a library song on the air now.
+            if !isPlaying { radioPlayNext() }
         } else if radioLibraryID == libraryID {
             radioLibraryID = nil
-            radioStatus = isGenerating ? "Stopping after the current song…" : ""
+            radioPendingSongID = nil
+            radioRecentIDs = []
+            // The song already on the renderer keeps going and still gets filed.
+            radioWindingDown = isBusy ? libraryID : nil
+            radioStatus = isBusy ? "Radio off — finishing \u{201C}\(renderingTitle ?? "the current song")\u{201D}…" : ""
         }
+    }
+
+    // MARK: Radio playback
+    //
+    // With Auto-play on the station never goes silent: while the next song renders it
+    // airs random songs from the same library, and the fresh song goes on as soon as
+    // whatever is playing ends.
+
+    /// The rendered song queued to air next, if one is waiting.
+    var radioUpNext: Song? { radioPendingSongID.flatMap(song) }
+
+    private var radioAutoplayOn: Bool {
+        guard let id = radioLibraryID, let lib = library(id) else { return false }
+        return lib.radioAutoplay
+    }
+
+    /// A render finished: that song is next on the air (immediately if nothing is playing).
+    private func radioDidRender(_ songID: String) {
+        radioPendingSongID = songID
+        if !isPlaying { radioPlayNext() }
+    }
+
+    /// Airs the pending new song if there is one, otherwise a random song from the library.
+    private func radioPlayNext() {
+        guard radioAutoplayOn, let libID = radioLibraryID else { return }
+        let pool = songs(in: libID)
+        var next: Song? = nil
+        if let pending = radioPendingSongID, let s = song(pending) {
+            radioPendingSongID = nil
+            next = s
+        } else if !pool.isEmpty {
+            let unheard = pool.filter { !radioRecentIDs.contains($0.id) }
+            next = (unheard.isEmpty ? pool : unheard).randomElement()
+        }
+        guard let s = next else { stop(); return }
+        radioRecentIDs.append(s.id)
+        let memory = max(1, min(5, pool.count - 1))
+        if radioRecentIDs.count > memory { radioRecentIDs.removeFirst(radioRecentIDs.count - memory) }
+        play(s, queue: [s])
     }
 
     private func radioLoop() async {
@@ -469,6 +543,7 @@ final class StudioModel {
             }
         }
         radioStatus = ""
+        radioWindingDown = nil
         radioTask = nil
     }
 
@@ -518,8 +593,9 @@ final class StudioModel {
         radioCount += 1
         radioStatus = radioLibraryID == nil ? "" : "Generated \(radioCount) — writing the next song…"
 
-        if currentLib.radioAutoplay, let s = song(songID) {
-            if isPlaying { enqueue(s) } else { play(s, queue: [s]) }
+        if library(libraryID)?.radioAutoplay == true, let s = song(songID) {
+            if radioLibraryID == libraryID { radioDidRender(songID) }
+            else if !isPlaying { play(s, queue: [s]) }   // one-off render with the station off
         }
         return songID
     }
@@ -579,6 +655,7 @@ final class StudioModel {
         stageText = replacing == nil ? "Starting…" : "Regenerating \(replacing!.title)…"
         progress = nil
         isGenerating = true
+        renderingTitle = spec.title
         pendingOutputDir = outDir
         pendingSpec = spec
         replacingSong = replacing
@@ -657,10 +734,14 @@ final class StudioModel {
         }
     }
 
+    /// Cancels the render (and the station with it — otherwise it would immediately
+    /// start writing another song). Use `setRadio(false:)` to stop the station alone.
     func cancel() {
+        if let id = radioLibraryID { setRadio(false, for: id) }
+        radioWindingDown = nil
+        radioStatus = ""
         process?.terminate()
         claudeProcess?.terminate()
-        if let id = radioLibraryID { setRadio(false, for: id) }
         stageText = "Cancelling…"
     }
 
@@ -692,6 +773,7 @@ final class StudioModel {
 
     private func finish(success: Bool, message: String?) {
         isGenerating = false
+        renderingTitle = nil
         process = nil
         progress = success ? 1 : nil
         let completion = generationCompletion
@@ -784,10 +866,12 @@ final class StudioModel {
         }
     }
 
-    /// Appends to the current queue so it plays after what's already queued.
-    func enqueue(_ song: Song) {
-        guard isPlaying, !queue.contains(where: { $0.id == song.id }) else { return }
-        queue.append(song)
+    /// Moves on when a track ends or is skipped; an on-air station picks its own next track.
+    private func advanceQueue() {
+        let next = queueIndex + 1
+        if next < queue.count { play(queue[next], queue: queue, index: next) }
+        else if radioAutoplayOn { radioPlayNext() }
+        else { stop() }
     }
 
     func togglePause() {
@@ -799,16 +883,10 @@ final class StudioModel {
         guard let p = player else { return }
         playbackPosition = p.currentTime
         guard !isPaused else { return }
-        if !p.isPlaying {
-            let next = queueIndex + 1
-            if next < queue.count { play(queue[next], queue: queue, index: next) } else { stop() }
-        }
+        if !p.isPlaying { advanceQueue() }
     }
 
-    func playNext() {
-        let next = queueIndex + 1
-        if next < queue.count { play(queue[next], queue: queue, index: next) } else { stop() }
-    }
+    func playNext() { advanceQueue() }
 
     func playPrevious() {
         let prev = queueIndex - 1
@@ -845,9 +923,22 @@ final class StudioModel {
         editingSongID = song.id
     }
 
+    /// Opens a blank composer. Previous songs keep their details in studio.json, so nothing is lost.
     func newSong() {
         editingSongID = nil
         selection = nil
+        idea = ""
+        title = ""
+        style = ""
+        lyrics = ""
+        seedText = ""
+        mode = .full
+        fastDraft = false
+        if !isBusy { stageText = ""; progress = nil; errorMessage = nil }
+    }
+
+    var composerIsBlank: Bool {
+        [idea, title, style, lyrics, seedText].allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     // MARK: Song actions
@@ -856,21 +947,95 @@ final class StudioModel {
         NSWorkspace.shared.activateFileViewerSelecting([song.audioURL])
     }
 
+    /// `~/Music/Tunesmith`, falling back to the pre-rename folder when that's where the songs are.
+    nonisolated static func defaultOutputRoot(home: URL) -> URL {
+        let new = home.appendingPathComponent("Music/Tunesmith")
+        let legacy = home.appendingPathComponent("Music/YuE2 Studio")
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: new.path), fm.fileExists(atPath: legacy.path) { return legacy }
+        return new
+    }
+
+    nonisolated static let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
+
+    /// Transcodes FLAC → AAC M4A. Blocks until ffmpeg exits.
+    nonisolated static func transcodeM4A(from source: URL, to dest: URL) throws {
+        guard FileManager.default.fileExists(atPath: ffmpegPath) else {
+            throw ClaudeCLI.Failure(message: "ffmpeg not found at \(ffmpegPath) (brew install ffmpeg).")
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: ffmpegPath)
+        proc.arguments = ["-v", "error", "-y", "-i", source.path, "-c:a", "aac", "-b:a", "256k", dest.path]
+        try proc.run()
+        proc.waitUntilExit()
+        if proc.terminationStatus != 0 { throw ClaudeCLI.Failure(message: "ffmpeg export failed.") }
+    }
+
     func exportM4A(_ song: Song) {
-        let ffmpeg = "/opt/homebrew/bin/ffmpeg"
-        guard FileManager.default.fileExists(atPath: ffmpeg) else {
-            errorMessage = "ffmpeg not found at \(ffmpeg) (brew install ffmpeg)."; return
+        guard FileManager.default.fileExists(atPath: Self.ffmpegPath) else {
+            errorMessage = "ffmpeg not found at \(Self.ffmpegPath) (brew install ffmpeg)."; return
         }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "\(song.title).m4a"
         panel.allowedContentTypes = [.mpeg4Audio]
         guard panel.runModal() == .OK, let dest = panel.url else { return }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: ffmpeg)
-        proc.arguments = ["-v", "error", "-y", "-i", song.audioURL.path, "-c:a", "aac", "-b:a", "256k", dest.path]
-        try? proc.run()
-        proc.waitUntilExit()
-        if proc.terminationStatus != 0 { errorMessage = "ffmpeg export failed." }
+        do { try Self.transcodeM4A(from: song.audioURL, to: dest) }
+        catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Emails the song (as M4A, with its style and optionally lyrics) through Remail.
+    /// Returns the Remail message id.
+    func shareByEmail(_ song: Song, to recipients: [String], message: String, includeLyrics: Bool) async throws -> String {
+        let client = RemailClient(apiKey: remailAPIKey)
+        let from = remailFrom.trimmingCharacters(in: .whitespaces)
+        let replyTo = remailReplyTo.trimmingCharacters(in: .whitespaces)
+        let note = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lyrics = includeLyrics ? lyrics(for: song).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        let filename = song.title.replacingOccurrences(of: "/", with: "-") + ".m4a"
+
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("share-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let source = song.audioURL
+        let audio = try await Task.detached {
+            try Self.transcodeM4A(from: source, to: tmp)
+            return try Data(contentsOf: tmp)
+        }.value
+        guard audio.count <= RemailClient.maxAttachmentBytes else {
+            throw ClaudeCLI.Failure(message: "“\(song.title)” is too large to email (\(audio.count / 1_048_576) MB after conversion).")
+        }
+
+        var text = ""
+        if !note.isEmpty { text += note + "\n\n" }
+        text += "“\(song.title)”\n\(song.style)\n\nThe song is attached (\(filename))."
+        if !lyrics.isEmpty { text += "\n\nLyrics\n\n\(lyrics)" }
+        text += "\n\n—\nMade with Song Studio"
+
+        func esc(_ s: String) -> String {
+            s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
+        }
+        var html = #"<div style="font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:560px;color:#222;line-height:1.5">"#
+        if !note.isEmpty { html += #"<p style="white-space:pre-wrap">\#(esc(note))</p>"# }
+        html += #"<h2 style="margin:24px 0 4px">\#(esc(song.title))</h2>"#
+        html += #"<p style="margin:0 0 16px;color:#666">\#(esc(song.style))</p>"#
+        html += #"<p>🎧 The song is attached as <b>\#(esc(filename))</b>.</p>"#
+        if !lyrics.isEmpty {
+            html += #"<h3 style="margin:24px 0 8px">Lyrics</h3><pre style="white-space:pre-wrap;font-family:inherit;margin:0">\#(esc(lyrics))</pre>"#
+        }
+        html += #"<p style="margin-top:32px;color:#999;font-size:12px">Made with Song Studio</p></div>"#
+
+        return try await client.send(
+            from: from.isEmpty ? Self.defaultRemailFrom : from, to: recipients,
+            replyTo: replyTo.isEmpty ? nil : replyTo, subject: "“\(song.title)” — a song for you",
+            text: text, html: html,
+            attachments: [.init(filename: filename, data: audio, contentType: "audio/mp4")])
+    }
+
+    func lyrics(for song: Song) -> String {
+        if let meta = StudioMeta.load(from: song.directory) { return meta.lyrics }
+        guard let data = try? Data(contentsOf: song.directory.appendingPathComponent("request.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
+        return (json["lyrics"] as? String) ?? ""
     }
 
     func deleteSong(_ song: Song) {

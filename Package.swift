@@ -2,10 +2,10 @@
 import PackageDescription
 
 let package = Package(
-    name: "YuE2Studio",
+    name: "Tunesmith",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "YuE2Studio", path: "Sources/YuE2Studio")
+        .executableTarget(name: "Tunesmith", path: "Sources/Tunesmith")
     ],
     swiftLanguageVersions: [.v5]
 )

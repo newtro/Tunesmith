@@ -1008,7 +1008,7 @@ final class StudioModel {
         if !note.isEmpty { text += note + "\n\n" }
         text += "“\(song.title)”\n\(song.style)\n\nThe song is attached (\(filename))."
         if !lyrics.isEmpty { text += "\n\nLyrics\n\n\(lyrics)" }
-        text += "\n\n—\nMade with Song Studio"
+        text += "\n\n—\nMade with Tunesmith"
 
         func esc(_ s: String) -> String {
             s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
@@ -1022,7 +1022,7 @@ final class StudioModel {
         if !lyrics.isEmpty {
             html += #"<h3 style="margin:24px 0 8px">Lyrics</h3><pre style="white-space:pre-wrap;font-family:inherit;margin:0">\#(esc(lyrics))</pre>"#
         }
-        html += #"<p style="margin-top:32px;color:#999;font-size:12px">Made with Song Studio</p></div>"#
+        html += #"<p style="margin-top:32px;color:#999;font-size:12px">Made with Tunesmith</p></div>"#
 
         return try await client.send(
             from: from.isEmpty ? Self.defaultRemailFrom : from, to: recipients,

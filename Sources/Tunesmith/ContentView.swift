@@ -211,12 +211,11 @@ struct SongRow: View {
     let song: Song
 
     var body: some View {
+        let playing = model.isPlaying(song)
         HStack(spacing: 8) {
-            Image(systemName: model.isPlaying(song) ? "speaker.wave.2.fill" : (song.source == "radio" ? "dot.radiowaves.left.and.right" : "music.note"))
-                .foregroundStyle(model.isPlaying(song) ? Color.accentColor : .secondary)
-                .frame(width: 14)
+            SongTile(song: song, size: 20)
             VStack(alignment: .leading, spacing: 2) {
-                Text(song.title).lineLimit(1)
+                Text(song.title).fontWeight(playing ? .semibold : .regular).lineLimit(1)
                 Text(song.created.formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.tertiary)
             }
         }
@@ -297,18 +296,18 @@ struct LibrarySummary: View {
         let cats = lib.categories.filter { $0 != LibraryIndex.uncategorized }
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 16) {
-                Image(systemName: "books.vertical.fill").font(.system(size: 34)).foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 4) {
+                Artwork(seed: lib.name, size: 66, glyph: "books.vertical.fill")
+                VStack(alignment: .leading, spacing: 6) {
                     Text(lib.name).font(.title2.bold())
                     Text(lib.description.isEmpty ? "No description yet — press Edit to describe this library and enable radio." : lib.description)
                         .font(.callout).foregroundStyle(lib.description.isEmpty ? .tertiary : .secondary)
                         .lineLimit(4)
-                    HStack(spacing: 14) {
-                        Label("\(items.count) song\(items.count == 1 ? "" : "s")", systemImage: "music.note")
-                        Label("\(cats.count) categor\(cats.count == 1 ? "y" : "ies")", systemImage: "folder")
-                        if !lib.refinedDescription.isEmpty { Label("Station brief ready", systemImage: "checkmark.seal") }
+                    HStack(spacing: 6) {
+                        StatChip(icon: "music.note", text: "\(items.count) song\(items.count == 1 ? "" : "s")")
+                        StatChip(icon: "folder", text: "\(cats.count) categor\(cats.count == 1 ? "y" : "ies")")
+                        if !lib.refinedDescription.isEmpty { StatChip(icon: "checkmark.seal", text: "Station brief ready") }
                     }
-                    .font(.caption).foregroundStyle(.tertiary).padding(.top, 2)
+                    .padding(.top, 2)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 8) {
@@ -382,29 +381,25 @@ struct LibrarySongRow: View {
     var showCategory = true
 
     var body: some View {
+        let playing = model.isPlaying(song)
         HStack(spacing: 12) {
-            Button { model.togglePlay(song) } label: {
-                Image(systemName: model.isPlaying(song) ? "stop.circle.fill" : "play.circle")
-                    .font(.system(size: 18))
-                    .foregroundStyle(model.isPlaying(song) ? Color.accentColor : .secondary)
-            }
-            .buttonStyle(.plain)
+            SongTile(song: song, size: 32)
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(song.title).fontWeight(model.isPlaying(song) ? .semibold : .regular)
-                    if song.source == "radio" {
-                        Image(systemName: "dot.radiowaves.left.and.right").font(.caption2).foregroundStyle(.tertiary)
-                    }
-                }
+                Text(song.title).fontWeight(playing ? .semibold : .regular).lineLimit(1)
                 Text(song.style).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
             if showCategory {
                 Text(model.index.placement(for: song.id).category).font(.caption).foregroundStyle(.tertiary)
             }
-            Text(song.created.formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.tertiary)
+            Text(song.created.formatted(date: .abbreviated, time: .shortened))
+                .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+            Button { model.togglePlay(song) } label: {
+                Image(systemName: playing ? "stop.fill" : "play.fill")
+            }
+            .buttonStyle(.plain).foregroundStyle(playing ? Color.accentColor : .secondary)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
         .contextMenu { SongContextMenu(song: song) }
     }
 }
@@ -496,7 +491,7 @@ struct RadioView: View {
                 ContentUnavailableView("No songs yet", systemImage: "music.note.list",
                                        description: Text("The first song goes on the air as soon as it's rendered."))
             } else {
-                List(items) { song in RadioSongRow(song: song) }
+                List(items) { song in LibrarySongRow(song: song) }
             }
         }
     }
@@ -665,39 +660,6 @@ struct RadioView: View {
     }
 }
 
-struct RadioSongRow: View {
-    @Environment(StudioModel.self) private var model
-    let song: Song
-
-    var body: some View {
-        let playing = model.isPlaying(song)
-        HStack(spacing: 12) {
-            ZStack {
-                Artwork(seed: song.id, size: 34)
-                if playing {
-                    Color.black.opacity(0.3).clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    EQBars(bars: 3, active: !model.isPaused, height: 13)
-                }
-            }
-            .frame(width: 34, height: 34)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(song.title).fontWeight(playing ? .semibold : .regular).lineLimit(1)
-                Text(song.style).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer()
-            Text(model.index.placement(for: song.id).category).font(.caption).foregroundStyle(.tertiary)
-            Text(song.created.formatted(date: .omitted, time: .shortened))
-                .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
-            Button { model.togglePlay(song) } label: {
-                Image(systemName: playing ? "stop.fill" : "play.fill")
-            }
-            .buttonStyle(.plain).foregroundStyle(playing ? Color.accentColor : .secondary)
-        }
-        .padding(.vertical, 3)
-        .contextMenu { SongContextMenu(song: song) }
-    }
-}
-
 // MARK: - Visual bits
 
 /// FNV-1a: stable across launches, unlike Swift's per-process seeded hashValue.
@@ -737,6 +699,26 @@ struct Artwork: View {
             }
             .overlay(shape.strokeBorder(.white.opacity(0.16)))
             .shadow(color: .black.opacity(0.2), radius: size * 0.05, y: size * 0.02)
+    }
+}
+
+/// A song's artwork, with a live meter over it while that song is playing.
+struct SongTile: View {
+    @Environment(StudioModel.self) private var model
+    let song: Song
+    var size: CGFloat = 32
+    var bars = 3
+
+    var body: some View {
+        ZStack {
+            Artwork(seed: song.id, size: size,
+                    glyph: song.source == "radio" ? "dot.radiowaves.left.and.right" : "music.note")
+            if model.isPlaying(song) {
+                RoundedRectangle(cornerRadius: size * 0.18, style: .continuous).fill(.black.opacity(0.38))
+                EQBars(bars: bars, active: !model.isPaused, height: size * 0.4)
+            }
+        }
+        .frame(width: size, height: size)
     }
 }
 
@@ -782,6 +764,7 @@ struct StatChip: View {
     var body: some View {
         Label(text, systemImage: icon)
             .font(.caption).foregroundStyle(.secondary)
+            .lineLimit(1)
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(.quaternary.opacity(0.5), in: Capsule())
     }
@@ -847,22 +830,26 @@ struct SongPlayerView: View {
         VStack(spacing: 0) {
             // Header
             HStack(alignment: .top, spacing: 16) {
-                Image(systemName: song.source == "radio" ? "dot.radiowaves.left.and.right" : "music.note")
-                    .font(.system(size: 30)).foregroundStyle(.tint)
-                    .frame(width: 44, height: 44)
-                    .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
-                VStack(alignment: .leading, spacing: 4) {
+                SongTile(song: song, size: 92, bars: 5)
+                VStack(alignment: .leading, spacing: 6) {
                     Text(song.title).font(.title2.bold())
                     Text(song.style).font(.callout).foregroundStyle(.secondary).lineLimit(2)
-                    Label("\(model.library(p.library)?.name ?? "") › \(p.category)", systemImage: "folder")
-                        .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
-                    Text([
-                        meta.map { $0.mode == "off" ? "Direct" : ($0.mode == "melody" ? "Melody" : "Full score") },
-                        meta.map { $0.odeSteps <= 8 ? "Fast draft" : "Standard quality" },
-                        meta.map { "Seed \(String($0.seed))" },
-                        song.created.formatted(date: .abbreviated, time: .shortened),
-                    ].compactMap { $0 }.joined(separator: "  ·  "))
-                    .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                    HStack(spacing: 6) {
+                        StatChip(icon: "folder", text: "\(model.library(p.library)?.name ?? "") › \(p.category)")
+                        if song.source == "radio" { StatChip(icon: "dot.radiowaves.left.and.right", text: "radio") }
+                        Spacer(minLength: 0)
+                    }
+                    HStack(spacing: 6) {
+                        if let m = meta {
+                            StatChip(icon: "slider.horizontal.3",
+                                     text: m.mode == "off" ? "Direct" : (m.mode == "melody" ? "Melody" : "Full score"))
+                            StatChip(icon: m.odeSteps <= 8 ? "bolt" : "sparkles",
+                                     text: m.odeSteps <= 8 ? "Fast draft" : "Standard quality")
+                            StatChip(icon: "number", text: String(m.seed))
+                        }
+                        StatChip(icon: "calendar", text: song.created.formatted(date: .abbreviated, time: .shortened))
+                        Spacer(minLength: 0)
+                    }
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 8) {
@@ -985,8 +972,7 @@ struct NowPlayingBar: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            Image(systemName: "speaker.wave.2.fill").foregroundStyle(.tint)
-                .symbolEffect(.variableColor.iterative, isActive: !model.isPaused)
+            SongTile(song: song, size: 26)
             Button {
                 model.selection = .song(song.id)
             } label: {
@@ -1026,10 +1012,10 @@ struct PlaylistView: View {
         let items = model.songs(in: playlist)
         VStack(spacing: 0) {
             HStack(spacing: 14) {
-                Image(systemName: "music.note.list").font(.system(size: 30)).foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 2) {
+                Artwork(seed: playlist.name, size: 56, glyph: "music.note.list")
+                VStack(alignment: .leading, spacing: 5) {
                     Text(playlist.name).font(.title2.bold())
-                    Text("\(items.count) song\(items.count == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
+                    StatChip(icon: "music.note", text: "\(items.count) song\(items.count == 1 ? "" : "s")")
                 }
                 Spacer()
                 if model.isPlaying, let id = model.nowPlayingID, playlist.songIDs.contains(id) {
@@ -1051,12 +1037,9 @@ struct PlaylistView: View {
                 List {
                     ForEach(Array(items.enumerated()), id: \.element.id) { i, song in
                         HStack(spacing: 12) {
-                            Button { model.playAll(items, from: i) } label: {
-                                Image(systemName: model.isPlaying(song) ? "speaker.wave.2.fill" : "play.circle")
-                                    .foregroundStyle(model.isPlaying(song) ? Color.accentColor : .secondary)
-                            }
-                            .buttonStyle(.plain)
                             Text("\(i + 1)").font(.caption.monospacedDigit()).foregroundStyle(.tertiary).frame(width: 22, alignment: .trailing)
+                            Button { model.playAll(items, from: i) } label: { SongTile(song: song, size: 30) }
+                                .buttonStyle(.plain)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(song.title).fontWeight(model.isPlaying(song) ? .semibold : .regular)
                                 Text(song.style).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -1225,10 +1208,13 @@ struct StatusBar: View {
                     .lineLimit(1)
                     .foregroundStyle(model.stageText == "Failed" ? .red : .primary)
                 if model.isBusy {
-                    if let p = model.progress {
-                        ProgressView(value: p).progressViewStyle(.linear)
-                    } else {
-                        ProgressView().progressViewStyle(.linear)
+                    HStack(spacing: 10) {
+                        RenderingMeter(progress: model.progress, active: true).frame(maxWidth: 260)
+                        if let p = model.progress {
+                            Text("\(Int((p * 100).rounded()))%")
+                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
                     }
                 }
             }
@@ -1274,11 +1260,10 @@ struct SongPanel: View {
             Button {
                 model.togglePlay(song)
             } label: {
-                Image(systemName: model.isPlaying(song) ? "stop.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 34))
+                SongTile(song: song, size: 36)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.tint)
+            .help(model.isPlaying(song) ? "Stop" : "Play")
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(song.title).font(.headline)

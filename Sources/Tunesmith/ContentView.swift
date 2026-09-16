@@ -99,6 +99,8 @@ struct SidebarView: View {
                                 } icon: { Image(systemName: "folder") }
                             }
                             .contextMenu {
+                                Button("Shuffle") { model.playShuffled(items) }
+                                    .disabled(items.isEmpty)
                                 if category != LibraryIndex.uncategorized {
                                     Button("Rename…") { renameText = category; renameTarget = .category(lib.id, category) }
                                     Button("Delete category", role: .destructive) { model.deleteCategory(category, in: lib.id) }
@@ -122,6 +124,7 @@ struct SidebarView: View {
                     .tag(SidebarSelection.library(lib.id))
                     .contextMenu {
                         Button("Open library page") { model.selection = .library(lib.id) }
+                        Button("Shuffle") { model.playShuffled(model.songs(in: lib.id)) }
                         Button("New Category…") { newName = ""; categoryTarget = lib.id; model.askNewCategory = true }
                         Button("Rename…") { renameText = lib.name; renameTarget = .library(lib.id) }
                         Divider()
@@ -142,6 +145,7 @@ struct SidebarView: View {
                         .tag(SidebarSelection.playlist(playlist.id))
                         .contextMenu {
                             Button("Play") { model.playAll(model.songs(in: playlist)) }
+                            Button("Shuffle") { model.playShuffled(model.songs(in: playlist)) }
                             Button("Rename…") { renameText = playlist.name; renameTarget = .playlist(playlist.id) }
                             Divider()
                             Button("Delete playlist", role: .destructive) { model.deletePlaylist(playlist.id) }
@@ -366,6 +370,9 @@ struct LibrarySummary: View {
                         Text(model.stageText.isEmpty ? model.radioStatus : model.stageText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer()
+                    Button { model.playShuffled(items) } label: { Label("Shuffle", systemImage: "shuffle") }
+                        .disabled(items.isEmpty)
+                        .help("Play everything in this library in a random order")
                     Button { model.playAll(items) } label: { Label("Play all", systemImage: "play.fill") }
                         .disabled(items.isEmpty)
                 }
@@ -884,6 +891,9 @@ struct SongPlayerView: View {
                         .buttonStyle(.plain).disabled(!playing)
                     Button { model.stop() } label: { Image(systemName: "stop.fill").font(.title3) }
                         .buttonStyle(.plain).disabled(!playing)
+                    Button { model.shuffleQueue() } label: { Image(systemName: "shuffle").font(.title3) }
+                        .buttonStyle(.plain).disabled(!model.canShuffleQueue)
+                        .help("Shuffle the songs still to come")
                     Spacer()
                     if playing, model.isPaused { Text("Paused").font(.caption).foregroundStyle(.secondary) }
                 }
@@ -991,6 +1001,10 @@ struct NowPlayingBar: View {
             Button { model.togglePause() } label: { Image(systemName: model.isPaused ? "play.fill" : "pause.fill").frame(width: 16) }.buttonStyle(.plain)
             Button { model.stop() } label: { Image(systemName: "stop.fill") }.buttonStyle(.plain)
             Button { model.playNext() } label: { Image(systemName: "forward.fill") }.buttonStyle(.plain)
+            Button { model.shuffleQueue() } label: { Image(systemName: "shuffle") }
+                .buttonStyle(.plain)
+                .disabled(!model.canShuffleQueue)
+                .help("Shuffle the songs still to come")
         }
         .padding(.horizontal, 20).padding(.vertical, 10)
         .background(.bar)
@@ -1022,7 +1036,13 @@ struct PlaylistView: View {
                     Button { model.playPrevious() } label: { Image(systemName: "backward.fill") }
                     Button { model.stop() } label: { Image(systemName: "stop.fill") }
                     Button { model.playNext() } label: { Image(systemName: "forward.fill") }
+                    Button { model.shuffleQueue() } label: { Image(systemName: "shuffle") }
+                        .disabled(!model.canShuffleQueue)
+                        .help("Shuffle the songs still to come")
                 } else {
+                    Button { model.playShuffled(items) } label: { Label("Shuffle", systemImage: "shuffle") }
+                        .disabled(items.isEmpty)
+                        .help("Play this playlist in a random order")
                     Button { model.playAll(items) } label: { Label("Play all", systemImage: "play.fill") }
                         .buttonStyle(.borderedProminent)
                         .disabled(items.isEmpty)

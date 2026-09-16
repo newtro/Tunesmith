@@ -836,6 +836,22 @@ final class StudioModel {
         play(list[start], queue: list, index: start)
     }
 
+    /// Plays the whole list in a random order.
+    func playShuffled(_ list: [Song]) {
+        guard !list.isEmpty else { return }
+        playAll(list.shuffled())
+    }
+
+    /// Reshuffles what is still to come, leaving the song on the air alone.
+    func shuffleQueue() {
+        let next = queueIndex + 1
+        guard queue.count > next + 1 else { return }
+        queue.replaceSubrange(next..., with: queue[next...].shuffled())
+    }
+
+    /// True when there is more than one track still queued to shuffle.
+    var canShuffleQueue: Bool { queue.count > queueIndex + 2 }
+
     private func play(_ song: Song, queue: [Song], index: Int = 0) {
         stop()
         do {
